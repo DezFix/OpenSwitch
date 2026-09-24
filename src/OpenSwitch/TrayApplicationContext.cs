@@ -115,7 +115,28 @@ public sealed class TrayApplicationContext : ApplicationContext
         trayMenu.Items.Add(localizer.Get("Settings"), null, (_, _) => ShowSettings());
         trayMenu.Items.Add(new ToolStripSeparator());
         trayMenu.Items.Add(localizer.Get("Exit"), null, (_, _) => ExitThread());
+        AppTheme.Apply(trayMenu, settings.UseDarkTheme);
         notifyIcon.Text = localizer.Get("AppName");
+    }
+
+    private void ApplyTheme(bool darkTheme)
+    {
+        if (settingsForm is { IsDisposed: false })
+        {
+            AppTheme.Apply(settingsForm, darkTheme);
+        }
+
+        if (clipboardHistoryForm is { IsDisposed: false })
+        {
+            AppTheme.Apply(clipboardHistoryForm, darkTheme);
+        }
+
+        if (diaryForm is { IsDisposed: false })
+        {
+            AppTheme.Apply(diaryForm, darkTheme);
+        }
+
+        AppTheme.Apply(trayMenu, darkTheme);
     }
 
     private void ShowSettings()
@@ -131,7 +152,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             return;
         }
 
-        settingsForm = new SettingsForm(settings, localizer, SaveSettings, ShowDiary, soundService.Play);
+        settingsForm = new SettingsForm(settings, localizer, SaveSettings, ShowDiary, soundService.Play, ApplyTheme);
         settingsForm.FormClosed += (_, _) => settingsForm = null;
         settingsForm.Show();
         settingsForm.Activate();
@@ -274,6 +295,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         }
 
         clipboardHistoryForm = new ClipboardHistoryForm(clipboardHistoryService, localizer);
+        AppTheme.Apply(clipboardHistoryForm, settings.UseDarkTheme);
         clipboardHistoryForm.FormClosed += (_, _) => clipboardHistoryForm = null;
         clipboardHistoryForm.Show();
         clipboardHistoryForm.Activate();
@@ -288,6 +310,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         }
 
         diaryForm = new DiaryForm(diaryService, localizer);
+        AppTheme.Apply(diaryForm, settings.UseDarkTheme);
         diaryForm.FormClosed += (_, _) => diaryForm = null;
         diaryForm.Show();
         diaryForm.Activate();

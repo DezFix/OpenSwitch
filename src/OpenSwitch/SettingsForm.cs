@@ -16,7 +16,8 @@ public sealed class SettingsForm : Form
         Localizer localizer,
         Action<AppSettings> saveSettings,
         Action? openDiary = null,
-        Action<string>? testSound = null)
+        Action<string>? testSound = null,
+        Action<bool>? themeChanged = null)
     {
         workingSettings = SettingsStore.Clone(settings);
         this.localizer = localizer;
@@ -38,7 +39,7 @@ public sealed class SettingsForm : Form
             Dock = DockStyle.Fill
         };
 
-        BuildPages(openDiary, testSound);
+        BuildPages(openDiary, testSound, themeChanged);
         BuildNavigation();
 
         var split = new SplitContainer
@@ -92,11 +93,15 @@ public sealed class SettingsForm : Form
         Controls.Add(root);
 
         Navigate("General");
+        AppTheme.Apply(this, workingSettings.UseDarkTheme);
     }
 
-    private void BuildPages(Action? openDiary, Action<string>? testSound)
+    private void BuildPages(
+        Action? openDiary,
+        Action<string>? testSound,
+        Action<bool>? themeChanged)
     {
-        AddPage("General", SettingsPageFactory.CreateGeneral(workingSettings, localizer));
+        AddPage("General", SettingsPageFactory.CreateGeneral(workingSettings, localizer, themeChanged));
         AddPage("Additional", SettingsPageFactory.CreateAdditional(workingSettings, localizer));
         AddPage("Hotkeys", SettingsPageFactory.CreateHotkeys(workingSettings, localizer));
         AddPage("SwitchRules", SettingsPageFactory.CreateRules(workingSettings, localizer));

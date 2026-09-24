@@ -6,6 +6,7 @@ public sealed class AppSettings
 {
     public int Version { get; set; } = 2;
     public string Language { get; set; } = "auto";
+    public bool UseDarkTheme { get; set; } = true;
     public bool StartWithWindows { get; set; }
     public bool StartAsAdministrator { get; set; }
     public bool CheckForUpdates { get; set; }

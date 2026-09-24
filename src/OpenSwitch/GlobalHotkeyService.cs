@@ -25,6 +25,8 @@ public sealed class GlobalHotkeyService : NativeWindow, IDisposable
 
     public List<string> RegistrationErrors { get; } = [];
 
+    public List<string> ConfigurationErrors { get; } = [];
+
     public bool IsActionAvailable(string action)
     {
         return actionsById.Values.Contains(action, StringComparer.OrdinalIgnoreCase);
@@ -38,6 +40,7 @@ public sealed class GlobalHotkeyService : NativeWindow, IDisposable
     {
         UnregisterAll();
         RegistrationErrors.Clear();
+        ConfigurationErrors.Clear();
         foreach (var binding in bindings ?? [])
         {
             if (!binding.Enabled || string.IsNullOrWhiteSpace(binding.Shortcut))
@@ -77,13 +80,13 @@ public sealed class GlobalHotkeyService : NativeWindow, IDisposable
     {
         if (!TryParseShortcut(binding.Shortcut, out var modifiers, out var virtualKey))
         {
-            RegistrationErrors.Add($"Invalid shortcut: {binding.Shortcut}");
+            ConfigurationErrors.Add($"Invalid shortcut: {binding.Shortcut}");
             return;
         }
 
         if (!registeredShortcuts.Add(binding.Shortcut))
         {
-            RegistrationErrors.Add($"Duplicate shortcut: {binding.Shortcut}");
+            ConfigurationErrors.Add($"Duplicate shortcut: {binding.Shortcut}");
             return;
         }
 
@@ -139,11 +142,21 @@ public sealed class GlobalHotkeyService : NativeWindow, IDisposable
                 case "windows":
                     modifiers |= NativeMethods.MOD_WIN;
                     continue;
+                case "break":
+                    virtualKey = 0x03;
+                    continue;
+                case "pause":
+                    virtualKey = 0x13;
+                    continue;
             }
 
             if (!Enum.TryParse<Keys>(token, ignoreCase: true, out var key)
-                || key == Keys.None
-                || (ushort)key > 0xFF)
+                || key == Keys.None)
+            {
+                return false;
+            }
+
+            if ((ushort)key > 0xFF)
             {
                 return false;
             }

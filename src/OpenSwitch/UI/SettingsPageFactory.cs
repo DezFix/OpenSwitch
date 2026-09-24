@@ -2,7 +2,10 @@ namespace OpenSwitch.UI;
 
 internal static class SettingsPageFactory
 {
-    public static Control CreateGeneral(AppSettings settings, Localizer localizer)
+    public static Control CreateGeneral(
+        AppSettings settings,
+        Localizer localizer,
+        Action<bool>? themeChanged = null)
     {
         var (page, content) = CreatePage(localizer.Get("General"), localizer.Get("GeneralDescription"));
         AddCheck(content, localizer.Get("StartWithWindows"), settings.StartWithWindows, value => settings.StartWithWindows = value);
@@ -19,6 +22,15 @@ internal static class SettingsPageFactory
         AddCheck(content, localizer.Get("OnlyRussianEnglish"), settings.OnlyRussianEnglish, value => settings.OnlyRussianEnglish = value);
         AddCheck(content, localizer.Get("SingleLayout"), settings.SingleLayout, value => settings.SingleLayout = value);
         AddCheck(content, localizer.Get("AdditionalShiftSwitch"), settings.AdditionalShiftSwitch, value => settings.AdditionalShiftSwitch = value);
+        AddCheck(
+            content,
+            localizer.Get("DarkTheme"),
+            settings.UseDarkTheme,
+            value =>
+            {
+                settings.UseDarkTheme = value;
+                themeChanged?.Invoke(value);
+            });
 
         var languageComboBox = new ComboBox
         {
