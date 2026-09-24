@@ -1,0 +1,18 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>OpenSwitch</RootNamespace>
+    <AssemblyName>OpenSwitch</AssemblyName>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <ApplicationIcon Condition="Exists('Assets\openswitch.ico')">Assets\openswitch.ico</ApplicationIcon>
+  </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Localization\locales.json" />
+    <None Update="Assets\openswitch.ico" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Assets\openswitch.png" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>
