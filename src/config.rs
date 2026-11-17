@@ -1,0 +1,355 @@
+//! Settings file (simple `key = value` INI-like format) and hotkey parsing.
+
+use std::collections::HashSet;
+
+pub const VK_PAUSE: u8 = 0x13;
+pub const VK_CANCEL: u8 = 0x03; // what Ctrl+Pause produces
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct Hotkey {
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+    pub win: bool,
+    pub vk: u8,
+}
+
+impl Hotkey {
+    pub const NONE: Hotkey = Hotkey { ctrl: false, alt: false, shift: false, win: false, vk: 0 };
+
+    pub fn parse(s: &str) -> Option<Hotkey> {
+        let s = s.trim();
+        if s.is_empty() || s.eq_ignore_ascii_case("none") || s.eq_ignore_ascii_case("off") {
+            return Some(Hotkey::NONE);
+        }
+        let mut hk = Hotkey::NONE;
+        for part in s.split('+').map(|p| p.trim().to_ascii_lowercase()) {
+            match part.as_str() {
+                "ctrl" | "control" => hk.ctrl = true,
+                "alt" => hk.alt = true,
+                "shift" => hk.shift = true,
+                "win" => hk.win = true,
+                key => {
+                    if hk.vk != 0 {
+                        return None;
+                    }
+                    hk.vk = key_vk(key)?;
+                }
+            }
+        }
+        if hk.vk == 0 { None } else { Some(hk) }
+    }
+
+    pub fn matches(&self, vk: u8, ctrl: bool, alt: bool, shift: bool, win: bool) -> bool {
+        if self.vk == 0 {
+            return false;
+        }
+        let vk_ok = self.vk == vk || (self.vk == VK_PAUSE && self.ctrl && vk == VK_CANCEL);
+        vk_ok && self.ctrl == ctrl && self.alt == alt && self.shift == shift && self.win == win
+    }
+}
+
+impl std::fmt::Display for Hotkey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.vk == 0 {
+            return f.write_str("none");
+        }
+        if self.ctrl {
+            f.write_str("Ctrl+")?;
+        }
+        if self.alt {
+            f.write_str("Alt+")?;
+        }
+        if self.shift {
+            f.write_str("Shift+")?;
+        }
+        if self.win {
+            f.write_str("Win+")?;
+        }
+        f.write_str(&key_name(self.vk))
+    }
+}
+
+/// Keys offered in the settings UI (name, vk). vk 0 = no hotkey.
+pub fn key_choices() -> Vec<(String, u8)> {
+    let mut v = vec![
+        ("Нет".to_string(), 0),
+        ("Pause".to_string(), VK_PAUSE),
+        ("ScrollLock".to_string(), 0x91),
+        ("Insert".to_string(), 0x2D),
+        ("Menu".to_string(), 0x5D),
+        ("PrintScreen".to_string(), 0x2C),
+        ("Space".to_string(), 0x20),
+    ];
+    for n in 1..=12u8 {
+        v.push((format!("F{n}"), 0x6F + n));
+    }
+    for c in b'A'..=b'Z' {
+        v.push(((c as char).to_string(), c));
+    }
+    v
+}
+
+pub fn key_name(vk: u8) -> String {
+    match vk {
+        0 => "none".into(),
+        VK_PAUSE => "Pause".into(),
+        0x91 => "ScrollLock".into(),
+        0x14 => "CapsLock".into(),
+        0x2D => "Insert".into(),
+        0x20 => "Space".into(),
+        0x5D => "Menu".into(),
+        0x2C => "PrintScreen".into(),
+        v @ 0x70..=0x87 => format!("F{}", v - 0x6F),
+        v => (v as char).to_string(),
+    }
+}
+
+fn key_vk(name: &str) -> Option<u8> {
+    let vk = match name {
+        "pause" | "break" => VK_PAUSE,
+        "scrolllock" | "scroll" => 0x91,
+        "capslock" | "caps" => 0x14,
+        "insert" | "ins" => 0x2D,
+        "space" => 0x20,
+        "apps" | "menu" => 0x5D,
+        "printscreen" | "prtsc" => 0x2C,
+        _ => {
+            if let Some(n) = name.strip_prefix('f').and_then(|n| n.parse::<u8>().ok()) {
+                if (1..=24).contains(&n) {
+                    return Some(0x6F + n);
+                }
+                return None;
+            }
+            let b = name.as_bytes();
+            if b.len() == 1 && (b[0].is_ascii_alphanumeric()) {
+                return Some(b[0].to_ascii_uppercase());
+            }
+            return None;
+        }
+    };
+    Some(vk)
+}
+
+#[derive(Clone, Debug)]
+pub struct Settings {
+    pub auto_switch: bool,
+    pub single_letters: bool,
+    pub switch_on_enter: bool,
+    pub double_shift: bool,
+    pub sensitivity: f32,
+    pub hotkey_convert_word: Hotkey,
+    pub hotkey_convert_selection: Hotkey,
+    pub hotkey_toggle_auto: Hotkey,
+    /// Executables (lowercase file names) where auto switching is disabled.
+    pub exclude: HashSet<String>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            auto_switch: true,
+            single_letters: true,
+            switch_on_enter: true,
+            double_shift: true,
+            sensitivity: 1.0,
+            hotkey_convert_word: Hotkey { vk: VK_PAUSE, ..Hotkey::NONE },
+            hotkey_convert_selection: Hotkey { vk: VK_PAUSE, shift: true, ..Hotkey::NONE },
+            hotkey_toggle_auto: Hotkey { vk: VK_PAUSE, alt: true, ..Hotkey::NONE },
+            exclude: DEFAULT_EXCLUDE.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+}
+
+const DEFAULT_EXCLUDE: &[&str] = &[
+    "cmd.exe",
+    "powershell.exe",
+    "pwsh.exe",
+    "windowsterminal.exe",
+    "conhost.exe",
+    "putty.exe",
+    "mintty.exe",
+    "keepass.exe",
+    "keepassxc.exe",
+];
+
+pub const DEFAULT_FILE: &str = "\
+# OpenSwitch - настройки. Удобнее менять в окне «Настройки» (меню значка в трее).\n# После ручной правки файла: меню в трее -> «Перечитать настройки».
+# Значения true/false. Горячие клавиши: Pause, Shift+Pause, Alt+Pause, Ctrl+Shift+F12, ScrollLock, none ...
+
+# Автоматически исправлять слова, набранные не в той раскладке
+auto_switch = true
+
+# Исправлять однобуквенные слова (d -> в, z -> я, ш -> i)
+single_letters = true
+
+# Проверять слово также при нажатии Enter (иначе только пробел)
+switch_on_enter = true
+
+# Двойное нажатие Shift = исправить последнее слово (удобно на ноутбуках без Pause)
+double_shift = true
+
+# Чувствительность автопереключения: 0.5 (осторожно) ... 2.0 (агрессивно)
+sensitivity = 1.0
+
+# Исправить последнее слово (повторное нажатие — вернуть обратно)
+hotkey_convert_word = Pause
+
+# Исправить раскладку выделенного текста
+hotkey_convert_selection = Shift+Pause
+
+# Включить/выключить автопереключение
+hotkey_toggle_auto = Alt+Pause
+
+# Программы, в которых автопереключение не работает (ручное исправление работает).
+# Имена exe через запятую.
+exclude = cmd.exe, powershell.exe, pwsh.exe, windowsterminal.exe, conhost.exe, putty.exe, mintty.exe, keepass.exe, keepassxc.exe
+";
+
+fn parse_bool(v: &str) -> Option<bool> {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" | "1" | "да" => Some(true),
+        "false" | "no" | "off" | "0" | "нет" => Some(false),
+        _ => None,
+    }
+}
+
+impl Settings {
+    /// Parse settings; unknown keys and bad values are reported in the returned warnings.
+    pub fn parse(text: &str) -> (Settings, Vec<String>) {
+        let mut s = Settings::default();
+        let mut warn = Vec::new();
+        for (n, line) in text.lines().enumerate() {
+            let line = line.trim().trim_start_matches('\u{feff}');
+            if line.is_empty() || line.starts_with('#') || line.starts_with(';') || line.starts_with('[') {
+                continue;
+            }
+            let Some((k, v)) = line.split_once('=') else {
+                warn.push(format!("строка {}: нет '='", n + 1));
+                continue;
+            };
+            let (k, v) = (k.trim().to_ascii_lowercase(), v.trim());
+            let ok = match k.as_str() {
+                "auto_switch" => parse_bool(v).map(|b| s.auto_switch = b).is_some(),
+                "single_letters" => parse_bool(v).map(|b| s.single_letters = b).is_some(),
+                "switch_on_enter" => parse_bool(v).map(|b| s.switch_on_enter = b).is_some(),
+                "double_shift" => parse_bool(v).map(|b| s.double_shift = b).is_some(),
+                "sensitivity" => v.parse::<f32>().ok().filter(|x| *x > 0.0).map(|x| s.sensitivity = x).is_some(),
+                "hotkey_convert_word" => Hotkey::parse(v).map(|h| s.hotkey_convert_word = h).is_some(),
+                "hotkey_convert_selection" => Hotkey::parse(v).map(|h| s.hotkey_convert_selection = h).is_some(),
+                "hotkey_toggle_auto" => Hotkey::parse(v).map(|h| s.hotkey_toggle_auto = h).is_some(),
+                "exclude" => {
+                    s.exclude = v
+                        .split([',', ';'])
+                        .map(|x| x.trim().to_lowercase())
+                        .filter(|x| !x.is_empty())
+                        .collect();
+                    true
+                }
+                _ => {
+                    warn.push(format!("строка {}: неизвестный параметр '{}'", n + 1, k));
+                    continue;
+                }
+            };
+            if !ok {
+                warn.push(format!("строка {}: неверное значение для '{}'", n + 1, k));
+            }
+        }
+        (s, warn)
+    }
+
+    /// Serialise to the settings file format (with comments).
+    pub fn to_text(&self) -> String {
+        let b = |x: bool| if x { "true" } else { "false" };
+        let mut ex: Vec<&String> = self.exclude.iter().collect();
+        ex.sort();
+        let ex: Vec<&str> = ex.iter().map(|s| s.as_str()).collect();
+        let mut t = String::from(DEFAULT_FILE);
+        for (k, v) in [
+            ("auto_switch", b(self.auto_switch).to_string()),
+            ("single_letters", b(self.single_letters).to_string()),
+            ("switch_on_enter", b(self.switch_on_enter).to_string()),
+            ("double_shift", b(self.double_shift).to_string()),
+            ("sensitivity", format!("{:.2}", self.sensitivity)),
+            ("hotkey_convert_word", self.hotkey_convert_word.to_string()),
+            ("hotkey_convert_selection", self.hotkey_convert_selection.to_string()),
+            ("hotkey_toggle_auto", self.hotkey_toggle_auto.to_string()),
+            ("exclude", ex.join(", ")),
+        ] {
+            t = Settings::set_in_text(&t, k, &v);
+        }
+        t
+    }
+
+    /// Replace the value of `key` in an existing settings file text (or append it).
+    pub fn set_in_text(text: &str, key: &str, value: &str) -> String {
+        let mut found = false;
+        let mut out: Vec<String> = text
+            .lines()
+            .map(|l| {
+                let t = l.trim();
+                if !t.starts_with('#') {
+                    if let Some((k, _)) = t.split_once('=') {
+                        if k.trim().eq_ignore_ascii_case(key) {
+                            found = true;
+                            return format!("{key} = {value}");
+                        }
+                    }
+                }
+                l.to_string()
+            })
+            .collect();
+        if !found {
+            out.push(format!("{key} = {value}"));
+        }
+        out.join("\n") + "\n"
+    }
+}
+
+/// User exception list: one word per line, `#` comments.
+pub fn parse_exceptions(text: &str) -> HashSet<String> {
+    text.lines()
+        .map(|l| l.trim().to_lowercase())
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hotkeys() {
+        assert_eq!(Hotkey::parse("Pause").unwrap().vk, VK_PAUSE);
+        let h = Hotkey::parse("Ctrl+Shift+F12").unwrap();
+        assert!(h.ctrl && h.shift && !h.alt && h.vk == 0x7B);
+        assert!(Hotkey::parse("Ctrl+Pause").unwrap().matches(VK_CANCEL, true, false, false, false));
+        assert_eq!(Hotkey::parse("none"), Some(Hotkey::NONE));
+        assert!(Hotkey::parse("Ctrl+Foo").is_none());
+    }
+
+    #[test]
+    fn default_file_parses() {
+        let (s, w) = Settings::parse(DEFAULT_FILE);
+        assert!(w.is_empty(), "{w:?}");
+        let d = Settings::default();
+        assert_eq!(s.hotkey_convert_selection, d.hotkey_convert_selection);
+        assert_eq!(s.exclude, d.exclude);
+        let t = Settings::set_in_text(DEFAULT_FILE, "auto_switch", "false");
+        assert!(!Settings::parse(&t).0.auto_switch);
+
+        let mut m = Settings::default();
+        m.auto_switch = false;
+        m.sensitivity = 1.5;
+        m.hotkey_convert_word = Hotkey::parse("Ctrl+Shift+F12").unwrap();
+        m.hotkey_toggle_auto = Hotkey::NONE;
+        m.exclude = ["code.exe".to_string()].into_iter().collect();
+        let (p, w) = Settings::parse(&m.to_text());
+        assert!(w.is_empty(), "{w:?}");
+        assert!(!p.auto_switch);
+        assert_eq!(p.sensitivity, 1.5);
+        assert_eq!(p.hotkey_convert_word, m.hotkey_convert_word);
+        assert_eq!(p.hotkey_toggle_auto, Hotkey::NONE);
+        assert_eq!(p.exclude, m.exclude);
+    }
+}

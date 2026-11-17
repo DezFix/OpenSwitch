@@ -1,0 +1,40 @@
+[package]
+name = "openswitch"
+version = "0.1.0"
+edition = "2021"
+description = "Open-source automatic keyboard layout switcher (EN/RU) for Windows - a Punto Switcher alternative"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/DezFix/OpenSwitch"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "openswitch"
+path = "src/main.rs"
+
+[target.'cfg(windows)'.dependencies]
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_System_Ole",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_TextServices",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
