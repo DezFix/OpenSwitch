@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Wrong-layout detector.
 //!
 //! For a typed word we render the key strokes in both layouts and compare:
@@ -31,12 +32,7 @@ impl LangModel {
             Lang::En => (EN_WORDS, EN_ALPHA, EN_TRI),
             Lang::Ru => (RU_WORDS, RU_ALPHA, RU_TRI),
         };
-        let ranks = words
-            .lines()
-            .filter(|l| !l.is_empty())
-            .enumerate()
-            .map(|(i, w)| (w, i as u32 + 1))
-            .collect();
+        let ranks = words.lines().filter(|l| !l.is_empty()).enumerate().map(|(i, w)| (w, i as u32 + 1)).collect();
         LangModel { lang, ranks, alpha: alpha.chars().collect(), tri }
     }
 
@@ -53,11 +49,7 @@ impl LangModel {
     /// Normalise a rendered word for this language: lowercase, ё->е, strip edge punctuation.
     /// Returns None if the word contains characters that cannot be inside a word of this language.
     pub fn clean(&self, s: &str) -> Option<String> {
-        let mut w: String = s
-            .chars()
-            .flat_map(|c| c.to_lowercase())
-            .map(|c| if c == 'ё' { 'е' } else { c })
-            .collect();
+        let mut w: String = s.chars().flat_map(|c| c.to_lowercase()).map(|c| if c == 'ё' { 'е' } else { c }).collect();
         let is_letter = |c: char| c != ' ' && c != '\'' && self.alpha.contains(&c);
         let start = w.find(is_letter)?;
         let end = w.rfind(is_letter)? + w[w.rfind(is_letter)?..].chars().next()?.len_utf8();
@@ -102,7 +94,11 @@ impl LangModel {
                 b = ci;
             }
         }
-        if count == 0 { -20.0 } else { total / count as f32 }
+        if count == 0 {
+            -20.0
+        } else {
+            total / count as f32
+        }
     }
 
     pub fn lang(&self) -> Lang {
@@ -121,8 +117,7 @@ fn has_edge_junk(raw: &str, cur: Lang) -> bool {
     let any_edge = |c: char| matches!(c, '[' | ']' | '{' | '}' | '`' | '~' | '<' | '>');
     let lead_only = |c: char| matches!(c, ',' | '.' | ';' | '\'' | ':' | '"');
     let has_letter = raw.chars().any(|c| c.is_ascii_alphabetic());
-    has_letter
-        && (first.is_some_and(|c| any_edge(c) || lead_only(c)) || last.is_some_and(any_edge))
+    has_letter && (first.is_some_and(|c| any_edge(c) || lead_only(c)) || last.is_some_and(any_edge))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -258,7 +253,11 @@ impl Detector {
             Some(a) => {
                 let need = match alen {
                     2 => {
-                        if a <= 300 && rc.is_none_or(|r| r > 50 * a) { 0.0 } else { f32::INFINITY }
+                        if a <= 300 && rc.is_none_or(|r| r > 50 * a) {
+                            0.0
+                        } else {
+                            f32::INFINITY
+                        }
                     }
                     3 => 0.4,
                     _ => 0.0,

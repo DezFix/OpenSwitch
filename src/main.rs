@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! OpenSwitch — free, open-source automatic keyboard layout switcher (EN/RU) for Windows.
 //! Copyright (C) 2026 OpenSwitch contributors
 //!
@@ -6,6 +7,10 @@
 //! version 3 of the License, or (at your option) any later version. See LICENSE.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+#[cfg(windows)]
+mod clipboard;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod logging;
 #[cfg(windows)]
 mod sys;
 #[cfg(windows)]
@@ -16,8 +21,10 @@ mod win;
 #[cfg(windows)]
 fn main() {
     if std::env::args().any(|a| a == "--settings" || a == "/settings") {
+        logging::init("settings");
         ui::run();
     } else {
+        logging::init("tray");
         win::run();
     }
 }

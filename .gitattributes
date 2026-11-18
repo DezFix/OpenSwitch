@@ -3,3 +3,5 @@
 data/*.txt text eol=lf
 *.bin binary
 *.exe binary
+*.ico binary
+*.rgba binary

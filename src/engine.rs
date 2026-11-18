@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Platform-independent typing engine. The Windows hook feeds it raw key events and
 //! performs the returned actions (SendInput, layout switch, ...).
 
@@ -182,8 +183,8 @@ impl Engine {
                 _ => {}
             }
             if is_shift && !self.shift() {
-                let was_tap = self.shift_clean
-                    && self.shift_down_at.is_some_and(|t| now.saturating_sub(t) <= SHIFT_TAP_MAX_MS);
+                let was_tap =
+                    self.shift_clean && self.shift_down_at.is_some_and(|t| now.saturating_sub(t) <= SHIFT_TAP_MAX_MS);
                 self.shift_down_at = None;
                 self.shift_clean = false;
                 if was_tap && self.settings.double_shift {

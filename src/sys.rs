@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Windows helpers shared by the tray app and the settings window:
 //! files in %APPDATA%, autostart, process names, layout switching.
 
@@ -115,7 +116,14 @@ pub fn save_setting(key: &str, value: &str) {
 
 pub fn open_path(p: &Path) {
     unsafe {
-        ShellExecuteW(null_mut(), w("open").as_ptr(), w(&p.display().to_string()).as_ptr(), null(), null(), SW_SHOWNORMAL);
+        ShellExecuteW(
+            null_mut(),
+            w("open").as_ptr(),
+            w(&p.display().to_string()).as_ptr(),
+            null(),
+            null(),
+            SW_SHOWNORMAL,
+        );
     }
 }
 
@@ -299,13 +307,8 @@ pub fn request_layout(lang: Lang) {
 fn key_input(vk: u16, up: bool) -> INPUT {
     let mut i: INPUT = unsafe { std::mem::zeroed() };
     i.r#type = INPUT_KEYBOARD;
-    i.Anonymous.ki = KEYBDINPUT {
-        wVk: vk,
-        wScan: 0,
-        dwFlags: if up { KEYEVENTF_KEYUP } else { 0 },
-        time: 0,
-        dwExtraInfo: OUR_MARK,
-    };
+    i.Anonymous.ki =
+        KEYBDINPUT { wVk: vk, wScan: 0, dwFlags: if up { KEYEVENTF_KEYUP } else { 0 }, time: 0, dwExtraInfo: OUR_MARK };
     i
 }
 
@@ -319,7 +322,8 @@ fn system_toggle_keys() -> Vec<u16> {
                 let mut buf = [0u16; 16];
                 let mut size = (buf.len() * 2) as u32;
                 let mut ty = 0;
-                if RegQueryValueExW(key, w(name).as_ptr(), null(), &mut ty, buf.as_mut_ptr() as *mut u8, &mut size) == 0 {
+                if RegQueryValueExW(key, w(name).as_ptr(), null(), &mut ty, buf.as_mut_ptr() as *mut u8, &mut size) == 0
+                {
                     value = String::from_utf16_lossy(&buf[..(size as usize / 2)]).trim_end_matches('\0').to_string();
                     break;
                 }

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Keyboard layout tables: US QWERTY <-> Russian ЙЦУКЕН, keyed by Windows virtual-key codes.
 //! Platform independent so it can be unit-tested anywhere.
 
@@ -141,9 +142,16 @@ pub fn convert_text(text: &str, from: Lang, to: Lang) -> String {
 
 /// Guess which layout a piece of text was typed in (by counting Cyrillic vs Latin letters).
 pub fn guess_text_lang(text: &str) -> Lang {
-    let ru = text.chars().filter(|c| ('а'..='я').contains(&c.to_lowercase().next().unwrap_or(*c)) || *c == 'ё' || *c == 'Ё').count();
+    let ru = text
+        .chars()
+        .filter(|c| ('а'..='я').contains(&c.to_lowercase().next().unwrap_or(*c)) || *c == 'ё' || *c == 'Ё')
+        .count();
     let en = text.chars().filter(|c| c.is_ascii_alphabetic()).count();
-    if ru > en { Lang::Ru } else { Lang::En }
+    if ru > en {
+        Lang::Ru
+    } else {
+        Lang::En
+    }
 }
 
 /// Convert a selection: detects its layout and flips it to the other one.
@@ -154,9 +162,7 @@ pub fn flip_text(text: &str) -> String {
 
 /// Turn text into keystrokes in `lang` (used by tests and tools).
 pub fn keys_for_text(text: &str, lang: Lang) -> Option<Vec<KeyStroke>> {
-    text.chars()
-        .map(|c| key_for_char(c, lang).map(|(d, shift)| KeyStroke { vk: d.vk, shift, caps: false }))
-        .collect()
+    text.chars().map(|c| key_for_char(c, lang).map(|(d, shift)| KeyStroke { vk: d.vk, shift, caps: false })).collect()
 }
 
 #[cfg(test)]

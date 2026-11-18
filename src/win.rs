@@ -1,25 +1,33 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Windows tray app: low-level keyboard/mouse hooks, input injection, verified layout
 //! switching, tray icon and menu.
+//!
+//! Rule for the hook callbacks (`kb_proc`, `mouse_proc`): they must return within a few
+//! milliseconds, or Windows silently removes the hook. They only touch cached state and
+//! call `SendInput`; everything slow (process names, files, layout switching, clipboard)
+//! happens on the message loop after the hook returned, or on a worker thread.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::ffi::c_void;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+use std::time::Instant;
 
 use openswitch::detect::Detector;
 use openswitch::engine::{Action, Engine};
 use openswitch::layout::{flip_text, guess_text_lang, Lang};
 
+use crate::clipboard;
 use crate::sys::{self, w, APP_NAME, OUR_MARK, WINDOW_CLASS, WM_RELOAD};
 
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
-use windows_sys::Win32::System::DataExchange::*;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::Memory::*;
 use windows_sys::Win32::System::SystemInformation::GetTickCount64;
 use windows_sys::Win32::System::Threading::*;
+use windows_sys::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
 use windows_sys::Win32::UI::Shell::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
@@ -27,11 +35,13 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_TOGGLE_AUTO: u32 = WM_APP + 2;
 const WM_SWITCH_LAYOUT: u32 = WM_APP + 4;
+const WM_FOREGROUND: u32 = WM_APP + 5;
 const TIMER_ICON: usize = 1;
 const TIMER_REHOOK: usize = 2;
 const TIMER_VERIFY: usize = 3;
 const VERIFY_MS: u32 = 300;
-const CF_UNICODETEXT_ID: u32 = 13;
+/// A hook call slower than this is logged (Windows' own limit is around 300-1000 ms).
+const SLOW_HOOK_MS: u128 = 30;
 
 const ID_AUTO: usize = 100;
 const ID_STARTUP: usize = 101;
@@ -57,6 +67,8 @@ struct App {
     last_fg: HWND,
     fg_exe: Option<String>,
     fg_excluded: bool,
+    /// False between a foreground change seen by the hook and the program name lookup.
+    fg_known: bool,
     icon_state: Option<(Option<Lang>, bool)>,
     icon: HICON,
     taskbar_created: u32,
@@ -84,13 +96,8 @@ fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
 fn key_input(vk: u16, up: bool) -> INPUT {
     let mut i: INPUT = unsafe { std::mem::zeroed() };
     i.r#type = INPUT_KEYBOARD;
-    i.Anonymous.ki = KEYBDINPUT {
-        wVk: vk,
-        wScan: 0,
-        dwFlags: if up { KEYEVENTF_KEYUP } else { 0 },
-        time: 0,
-        dwExtraInfo: OUR_MARK,
-    };
+    i.Anonymous.ki =
+        KEYBDINPUT { wVk: vk, wScan: 0, dwFlags: if up { KEYEVENTF_KEYUP } else { 0 }, time: 0, dwExtraInfo: OUR_MARK };
     i
 }
 
@@ -191,7 +198,9 @@ fn verify_layout(hwnd: HWND) {
         if now == Some(p.lang) {
             if p.presses > 0 {
                 if let Some(e) = &a.fg_exe {
-                    a.slow_apps.insert(e.clone());
+                    if a.slow_apps.insert(e.clone()) {
+                        log::info!("{e}: ignores WM_INPUTLANGCHANGEREQUEST, will use the system shortcut");
+                    }
                 }
             }
             a.pending = None;
@@ -213,6 +222,7 @@ fn verify_layout(hwnd: HWND) {
         // Complete the cycle so the layout ends where the original request put it,
         // and never second-guess this program again.
         if let Some(e) = &a.fg_exe {
+            log::info!("{e}: keyboard layout cannot be read back, will not verify switches");
             a.unreliable_apps.insert(e.clone());
             a.slow_apps.remove(e);
         }
@@ -244,7 +254,19 @@ unsafe extern "system" fn kb_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
         if kb.flags & LLKHF_INJECTED == 0 && kb.vkCode < 256 {
             let msg = wparam as u32;
             let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
-            if handle_key(kb.vkCode as u8, down) {
+            let vk = kb.vkCode as u8;
+            let started = Instant::now();
+            // A panic must never unwind into Windows (that aborts the process) and must never
+            // leave a key swallowed: on panic the key is passed through.
+            let swallow = catch_unwind(AssertUnwindSafe(|| handle_key(vk, down))).unwrap_or_else(|_| {
+                with_app(|app| app.engine.reset_modifiers());
+                false
+            });
+            let ms = started.elapsed().as_millis();
+            if ms > SLOW_HOOK_MS {
+                log::warn!("slow keyboard hook: {ms} ms");
+            }
+            if swallow {
                 return 1;
             }
         }
@@ -256,25 +278,59 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
     if code == HC_ACTION as i32 {
         let m = wparam as u32;
         if m == WM_LBUTTONDOWN || m == WM_RBUTTONDOWN || m == WM_MBUTTONDOWN || m == WM_XBUTTONDOWN {
-            with_app(|app| app.engine.reset());
+            let _ = catch_unwind(|| with_app(|app| app.engine.reset()));
         }
     }
     CallNextHookEx(null_mut(), code, wparam, lparam)
+}
+
+/// WinEvent callback (runs on our message loop): the foreground window changed.
+unsafe extern "system" fn foreground_event(
+    _hook: HWINEVENTHOOK,
+    _event: u32,
+    hwnd: HWND,
+    _id_object: i32,
+    _id_child: i32,
+    _thread: u32,
+    _time: u32,
+) {
+    let _ = catch_unwind(|| set_foreground(hwnd));
+}
+
+/// Remember the new foreground window and resolve its program name. Called from the
+/// WinEvent hook and from `WM_FOREGROUND` (never from inside the keyboard hook: opening
+/// another process can be slow).
+fn set_foreground(fg: HWND) {
+    let exe = sys::exe_name(fg);
+    with_app(|app| {
+        if fg != app.last_fg {
+            app.last_fg = fg;
+            app.engine.reset();
+        }
+        app.fg_excluded = exe.as_ref().is_some_and(|n| app.engine.settings.exclude.contains(n));
+        app.fg_exe = exe;
+        app.fg_known = true;
+    });
 }
 
 fn is_modifier(vk: u8) -> bool {
     matches!(vk, 0x10..=0x12 | 0x5B | 0x5C | 0xA0..=0xA5)
 }
 
-/// Returns true if the key must be swallowed.
+/// Returns true if the key must be swallowed. Runs inside the keyboard hook: keep it fast.
 fn handle_key(vk: u8, down: bool) -> bool {
     let result = with_app(|app| {
         let fg = unsafe { GetForegroundWindow() };
         if fg != app.last_fg {
+            // The WinEvent has not arrived yet. Do not look the program up here (slow);
+            // ask the message loop to do it and treat the window as "excluded" until then.
+            // That is the safe choice and lasts only until the message loop runs again,
+            // i.e. a few keys at most; manual conversion (Pause) works meanwhile.
             app.last_fg = fg;
             app.engine.reset();
-            app.fg_exe = sys::exe_name(fg);
-            app.fg_excluded = app.fg_exe.as_ref().is_some_and(|n| app.engine.settings.exclude.contains(n));
+            app.fg_exe = None;
+            app.fg_known = false;
+            unsafe { PostMessageW(app.hwnd, WM_FOREGROUND, fg as usize, 0) };
         }
         let layout = sys::current_lang(fg);
         if down && !is_modifier(vk) {
@@ -287,13 +343,16 @@ fn handle_key(vk: u8, down: bool) -> bool {
             );
         }
         let now = unsafe { GetTickCount64() };
-        (app.engine.on_key(vk, down, now, layout, !app.fg_excluded), app.hwnd)
+        let auto_allowed = app.fg_known && !app.fg_excluded;
+        (app.engine.on_key(vk, down, now, layout, auto_allowed), app.hwnd)
     });
     let Some((out, hwnd)) = result else { return false };
     perform(out.actions, hwnd);
     out.swallow
 }
 
+/// Execute engine actions. Typing is sent right away (it must reach the window before the
+/// next physical key); everything else is deferred so the hook returns quickly.
 fn perform(actions: Vec<Action>, hwnd: HWND) {
     let mut inputs = Vec::new();
     for a in actions {
@@ -301,15 +360,15 @@ fn perform(actions: Vec<Action>, hwnd: HWND) {
             Action::Backspace(n) => (0..n).for_each(|_| push_tap(&mut inputs, VK_BACK)),
             Action::Type(t) => push_text(&mut inputs, &t),
             Action::Tap(vk) => push_tap(&mut inputs, vk as u16),
-            Action::SwitchLayout(l) => {
-                send(&inputs);
-                inputs.clear();
-                switch_layout(l);
-            }
+            Action::SwitchLayout(l) => unsafe {
+                PostMessageW(hwnd, WM_SWITCH_LAYOUT, lang_to_wparam(l), 0);
+            },
             Action::ConvertSelection => {
                 if !SELECTION_BUSY.swap(true, Ordering::SeqCst) {
                     std::thread::spawn(|| {
-                        convert_selection();
+                        if catch_unwind(convert_selection).is_err() {
+                            log::error!("convert_selection panicked");
+                        }
                         SELECTION_BUSY.store(false, Ordering::SeqCst);
                     });
                 }
@@ -317,10 +376,28 @@ fn perform(actions: Vec<Action>, hwnd: HWND) {
             Action::ToggleAuto => unsafe {
                 PostMessageW(hwnd, WM_TOGGLE_AUTO, 0, 0);
             },
-            Action::AddException(word) => sys::append_exception(&word),
+            Action::AddException(word) => {
+                // File I/O off the hook thread.
+                std::thread::spawn(move || sys::append_exception(&word));
+            }
         }
     }
     send(&inputs);
+}
+
+fn lang_to_wparam(l: Lang) -> WPARAM {
+    match l {
+        Lang::En => 0,
+        Lang::Ru => 1,
+    }
+}
+
+fn wparam_to_lang(w: WPARAM) -> Lang {
+    if w == 1 {
+        Lang::Ru
+    } else {
+        Lang::En
+    }
 }
 
 unsafe fn install_hooks() {
@@ -346,56 +423,8 @@ unsafe fn remove_hooks() {
 
 // ---------------------------------------------------------------- clipboard / selection
 
-unsafe fn clipboard_text() -> Option<String> {
-    for _ in 0..10 {
-        if OpenClipboard(null_mut()) != 0 {
-            let mut res = None;
-            let h = GetClipboardData(CF_UNICODETEXT_ID);
-            if !h.is_null() {
-                let p = GlobalLock(h) as *const u16;
-                if !p.is_null() {
-                    let mut len = 0;
-                    while *p.add(len) != 0 {
-                        len += 1;
-                    }
-                    res = Some(String::from_utf16_lossy(std::slice::from_raw_parts(p, len)));
-                    GlobalUnlock(h);
-                }
-            }
-            CloseClipboard();
-            return res;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    None
-}
-
-unsafe fn set_clipboard_text(text: &str) {
-    let data: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
-    for _ in 0..10 {
-        if OpenClipboard(null_mut()) != 0 {
-            EmptyClipboard();
-            let h = GlobalAlloc(GMEM_MOVEABLE, data.len() * 2);
-            if !h.is_null() {
-                let p = GlobalLock(h) as *mut u16;
-                if !p.is_null() {
-                    std::ptr::copy_nonoverlapping(data.as_ptr(), p, data.len());
-                    GlobalUnlock(h);
-                    if SetClipboardData(CF_UNICODETEXT_ID, h).is_null() {
-                        GlobalFree(h);
-                    }
-                } else {
-                    GlobalFree(h);
-                }
-            }
-            CloseClipboard();
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-}
-
-/// Runs on a worker thread: copy selection, convert, type it back, re-select it.
+/// Runs on a worker thread: copy selection, convert, type it back, re-select it, and put the
+/// user's clipboard back exactly as it was (all formats, not only text).
 fn convert_selection() {
     unsafe {
         // Wait until the user releases the hotkey modifiers (up to 1 s) so Ctrl+C is clean.
@@ -411,8 +440,12 @@ fn convert_selection() {
                 inputs.push(key_input(k, true));
             }
         }
-        let saved = clipboard_text();
-        let seq = GetClipboardSequenceNumber();
+        // If the snapshot fails (clipboard busy or huge), do not touch the clipboard at all.
+        let Some(saved) = clipboard::Snapshot::take() else {
+            log::warn!("convert selection: could not save the clipboard, skipped");
+            return;
+        };
+        let seq = clipboard::sequence_number();
         inputs.push(key_input(VK_CONTROL, false));
         push_tap(&mut inputs, b'C' as u16);
         inputs.push(key_input(VK_CONTROL, true));
@@ -421,22 +454,25 @@ fn convert_selection() {
         let mut changed = false;
         for _ in 0..40 {
             std::thread::sleep(std::time::Duration::from_millis(10));
-            if GetClipboardSequenceNumber() != seq {
+            if clipboard::sequence_number() != seq {
                 changed = true;
                 break;
             }
         }
         if !changed {
+            // Nothing selected (or the program ignores Ctrl+C): the clipboard is untouched.
+            log::debug!("convert selection: nothing was copied");
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(30));
-        let Some(text) = clipboard_text() else { return };
+        let Some(text) = clipboard::text() else {
+            saved.restore();
+            return;
+        };
         // Some editors (VS Code...) copy the whole line when nothing is selected.
         let single_line_with_newline = text.ends_with('\n') && text.trim_end().lines().count() <= 1;
         if text.is_empty() || single_line_with_newline || text.chars().count() > 5000 {
-            if let Some(s) = &saved {
-                set_clipboard_text(s);
-            }
+            saved.restore();
             return;
         }
         let target = guess_text_lang(&text).other();
@@ -451,11 +487,10 @@ fn convert_selection() {
         }
         send(&inputs);
         let main = MAIN_HWND.load(Ordering::SeqCst) as HWND;
-        PostMessageW(main, WM_SWITCH_LAYOUT, target as usize, 0);
+        PostMessageW(main, WM_SWITCH_LAYOUT, lang_to_wparam(target), 0);
         std::thread::sleep(std::time::Duration::from_millis(100));
-        if let Some(s) = &saved {
-            set_clipboard_text(s);
-        }
+        saved.restore();
+        log::debug!("convert selection: done, clipboard restored (empty before: {})", saved.is_empty());
     }
 }
 
@@ -570,7 +605,11 @@ unsafe fn update_tray(app: &mut App, force: bool, add: bool) {
     nid.hIcon = icon;
     copy_tip(
         &mut nid.szTip,
-        if auto { "OpenSwitch — автопереключение включено" } else { "OpenSwitch — автопереключение выключено" },
+        if auto {
+            "OpenSwitch — автопереключение включено"
+        } else {
+            "OpenSwitch — автопереключение выключено"
+        },
     );
     Shell_NotifyIconW(if add { NIM_ADD } else { NIM_MODIFY }, &nid);
     if !app.icon.is_null() {
@@ -597,6 +636,7 @@ fn set_auto(on: bool) {
 
 fn reload() -> Vec<String> {
     let (settings, warnings) = sys::load_settings();
+    log::info!("settings reloaded ({} warnings)", warnings.len());
     let exceptions = sys::load_exceptions();
     with_app(|app| {
         app.engine.detector.sensitivity = settings.sensitivity;
@@ -665,7 +705,11 @@ unsafe fn show_menu(hwnd: HWND) {
                      Клик по значку — вкл/выкл автопереключение.",
                     env!("CARGO_PKG_VERSION"),
                     s.hotkey_convert_word,
-                    if s.double_shift { "Shift Shift (двойное нажатие) — то же самое\n" } else { "" },
+                    if s.double_shift {
+                        "Shift Shift (двойное нажатие) — то же самое\n"
+                    } else {
+                        ""
+                    },
                     s.hotkey_convert_selection,
                     s.hotkey_toggle_auto,
                 ),
@@ -680,6 +724,14 @@ unsafe fn show_menu(hwnd: HWND) {
 }
 
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    // Never let a panic unwind into Windows.
+    catch_unwind(AssertUnwindSafe(|| wnd_proc_inner(hwnd, msg, wparam, lparam))).unwrap_or_else(|_| {
+        log::error!("panic while handling window message {msg:#x}");
+        0
+    })
+}
+
+unsafe fn wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_TRAY => {
             match lparam as u32 {
@@ -702,7 +754,15 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             0
         }
         WM_SWITCH_LAYOUT => {
-            switch_layout(if wparam == Lang::Ru as usize { Lang::Ru } else { Lang::En });
+            switch_layout(wparam_to_lang(wparam));
+            0
+        }
+        WM_FOREGROUND => {
+            // Posted by the keyboard hook; ignore it if the user has switched again since.
+            let fg = wparam as HWND;
+            if GetForegroundWindow() == fg {
+                set_foreground(fg);
+            }
             0
         }
         WM_TIMER => {
@@ -740,10 +800,11 @@ pub fn run() {
         let mutex = CreateMutexW(null(), 1, w("Local\\OpenSwitch.SingleInstance").as_ptr());
         if GetLastError() == ERROR_ALREADY_EXISTS {
             // Already running: open the settings window instead of a second tray icon.
+            log::info!("already running, opening settings instead");
             sys::spawn_self(&["--settings"]);
             return;
         }
-        SetProcessDPIAware();
+        // DPI awareness (Per-Monitor V2) is declared in the application manifest.
         sys::migrate_startup();
 
         let (settings, warnings) = sys::load_settings();
@@ -797,6 +858,7 @@ pub fn run() {
                 last_fg: null_mut(),
                 fg_exe: None,
                 fg_excluded: false,
+                fg_known: false,
                 icon_state: None,
                 icon: null_mut(),
                 taskbar_created,
@@ -806,14 +868,32 @@ pub fn run() {
             })
         });
         with_app(|app| update_tray(app, true, true));
+        set_foreground(GetForegroundWindow());
+        // Foreground changes are reported here, out of context, on this thread's message loop.
+        let fg_hook = SetWinEventHook(
+            EVENT_SYSTEM_FOREGROUND,
+            EVENT_SYSTEM_FOREGROUND,
+            null_mut(),
+            Some(foreground_event),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+        );
+        if fg_hook.is_null() {
+            log::warn!("SetWinEventHook failed: {}", GetLastError());
+        }
         install_hooks();
         if KB_HOOK.load(Ordering::SeqCst).is_null() {
+            log::error!("SetWindowsHookExW(WH_KEYBOARD_LL) failed: {}", GetLastError());
             message_box(hwnd, "Не удалось установить перехватчик клавиатуры.", MB_ICONERROR);
+        } else {
+            log::info!("keyboard hook installed");
         }
         SetTimer(hwnd, TIMER_ICON, 250, None);
         SetTimer(hwnd, TIMER_REHOOK, 60_000, None);
 
         if !warnings.is_empty() {
+            log::warn!("settings.ini: {}", warnings.join("; "));
             message_box(hwnd, &format!("Ошибки в settings.ini:\n{}", warnings.join("\n")), MB_ICONWARNING);
         }
 
@@ -823,6 +903,10 @@ pub fn run() {
             DispatchMessageW(&msg);
         }
         remove_hooks();
+        if !fg_hook.is_null() {
+            UnhookWinEvent(fg_hook);
+        }
+        log::info!("exit");
         with_app(|app| {
             if !app.icon.is_null() {
                 DestroyIcon(app.icon);

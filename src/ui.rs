@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Settings window (`openswitch.exe --settings`), built with egui.
 //! It edits %APPDATA%\OpenSwitch\settings.ini / exceptions.txt and tells the running tray app to reload.
 
@@ -60,7 +61,9 @@ impl SettingsApp {
     }
 
     fn dirty(&self) -> bool {
-        self.s.to_text() != self.saved.to_text() || self.words != self.saved_words || self.autostart != self.saved_autostart
+        self.s.to_text() != self.saved.to_text()
+            || self.words != self.saved_words
+            || self.autostart != self.saved_autostart
     }
 
     fn save(&mut self) {
@@ -82,6 +85,7 @@ impl SettingsApp {
                 self.status = Some((msg.into(), true, Instant::now()));
             }
             (Err(e), _) | (_, Err(e)) => {
+                log::error!("saving settings failed: {e}");
                 self.status = Some((format!("Не удалось сохранить: {e}"), false, Instant::now()));
             }
         }
@@ -122,7 +126,10 @@ impl SettingsApp {
         });
 
         section(ui, "Ручное исправление");
-        ui.checkbox(&mut self.s.double_shift, "Двойное нажатие Shift исправляет последнее слово (удобно без клавиши Pause)");
+        ui.checkbox(
+            &mut self.s.double_shift,
+            "Двойное нажатие Shift исправляет последнее слово (удобно без клавиши Pause)",
+        );
 
         section(ui, "Система");
         ui.checkbox(&mut self.autostart, "Запускать OpenSwitch вместе с Windows");
@@ -177,23 +184,24 @@ impl SettingsApp {
         );
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            let r = ui.add(egui::TextEdit::singleline(&mut self.new_exe).hint_text("например code.exe").desired_width(180.0));
+            let r = ui
+                .add(egui::TextEdit::singleline(&mut self.new_exe).hint_text("например code.exe").desired_width(180.0));
             let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if ui.button("Добавить").clicked() || enter {
                 add_exe(&mut self.s, &self.new_exe);
                 self.new_exe.clear();
             }
             let mut picked: Option<String> = None;
-            egui::ComboBox::from_id_salt("running")
-                .selected_text("Выбрать из открытых окон…")
-                .width(220.0)
-                .show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt("running").selected_text("Выбрать из открытых окон…").width(220.0).show_ui(
+                ui,
+                |ui| {
                     for e in &self.running {
                         if !self.s.exclude.contains(e) && ui.selectable_label(false, e).clicked() {
                             picked = Some(e.clone());
                         }
                     }
-                });
+                },
+            );
             if let Some(p) = picked {
                 add_exe(&mut self.s, &p);
             }
@@ -230,7 +238,8 @@ impl SettingsApp {
         );
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            let r = ui.add(egui::TextEdit::singleline(&mut self.new_word).hint_text("новое слово").desired_width(180.0));
+            let r =
+                ui.add(egui::TextEdit::singleline(&mut self.new_word).hint_text("новое слово").desired_width(180.0));
             let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if ui.button("Добавить").clicked() || enter {
                 let wd = self.new_word.trim().to_lowercase();
@@ -348,7 +357,8 @@ impl eframe::App for SettingsApp {
             ui.horizontal(|ui| {
                 let dirty = self.dirty();
                 let can_save = dirty && self.conflicts().is_none();
-                if ui.add_enabled(can_save, egui::Button::new(RichText::new("Сохранить").size(15.0))).clicked() {
+                if ui.add_enabled(can_save, egui::Button::new(RichText::new("Сохранить").size(15.0))).clicked()
+                {
                     self.save();
                 }
                 if ui.add_enabled(dirty, egui::Button::new("Отменить изменения")).clicked() {
@@ -361,7 +371,8 @@ impl eframe::App for SettingsApp {
                 }
                 if let Some((msg, ok, at)) = &self.status {
                     if at.elapsed() < Duration::from_secs(6) {
-                        let c = if *ok { Color32::from_rgb(0x2E, 0x9E, 0x4F) } else { Color32::from_rgb(0xD0, 0x50, 0x30) };
+                        let c =
+                            if *ok { Color32::from_rgb(0x2E, 0x9E, 0x4F) } else { Color32::from_rgb(0xD0, 0x50, 0x30) };
                         ui.colored_label(c, msg);
                         ui.ctx().request_repaint_after(Duration::from_millis(500));
                     }
@@ -383,26 +394,10 @@ impl eframe::App for SettingsApp {
     }
 }
 
-/// Window icon: rounded square, half blue (EN) / half red (RU).
+/// Window icon: the application icon (assets/openswitch.svg) rendered at 64x64, raw RGBA.
 fn app_icon() -> egui::IconData {
-    let n = 64usize;
-    let mut rgba = vec![0u8; n * n * 4];
-    let r = n as f32 * 0.22;
-    for y in 0..n {
-        for x in 0..n {
-            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
-            let cx = fx.clamp(r, n as f32 - r);
-            let cy = fy.clamp(r, n as f32 - r);
-            let a = (r - ((fx - cx).powi(2) + (fy - cy).powi(2)).sqrt() + 0.5).clamp(0.0, 1.0);
-            let (cr, cg, cb) = if x + y < n { (0x1E, 0x7A, 0xC8) } else { (0xD6, 0x3A, 0x35) };
-            // white double arrow stripe in the middle
-            let on_line = (y as i32 - n as i32 / 2).abs() <= 3 && x > n / 5 && x < n * 4 / 5;
-            let (cr, cg, cb) = if on_line { (0xFF, 0xFF, 0xFF) } else { (cr, cg, cb) };
-            let i = (y * n + x) * 4;
-            rgba[i..i + 4].copy_from_slice(&[cr, cg, cb, (a * 255.0) as u8]);
-        }
-    }
-    egui::IconData { rgba, width: n as u32, height: n as u32 }
+    const RGBA: &[u8] = include_bytes!("../assets/icon-64.rgba");
+    egui::IconData { rgba: RGBA.to_vec(), width: 64, height: 64 }
 }
 
 fn setup_fonts(ctx: &egui::Context) {
@@ -457,12 +452,30 @@ pub fn run() {
             .with_icon(app_icon()),
         ..Default::default()
     };
-    let _ = eframe::run_native(
+    if let Err(e) = eframe::run_native(
         TITLE,
         options,
         Box::new(|cc| {
             setup_fonts(&cc.egui_ctx);
             Ok(Box::new(SettingsApp::new()))
         }),
-    );
+    ) {
+        // Typically: no OpenGL 2+ (virtual machines, some RDP sessions, very old drivers).
+        log::error!("settings window failed to start: {e}");
+        let text = format!(
+            "Не удалось открыть окно настроек:\n{e}\n\n\
+             Скорее всего, видеодрайвер не поддерживает OpenGL 2 (бывает в виртуальных машинах и по RDP).\n\
+             Настройки можно изменить вручную в файле:\n{}",
+            sys::settings_path().display()
+        );
+        unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW(
+                std::ptr::null_mut(),
+                sys::w(&text).as_ptr(),
+                sys::w(TITLE).as_ptr(),
+                windows_sys::Win32::UI::WindowsAndMessaging::MB_ICONERROR,
+            );
+        }
+        sys::open_path(&sys::data_dir());
+    }
 }

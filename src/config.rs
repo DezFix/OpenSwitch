@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Settings file (simple `key = value` INI-like format) and hotkey parsing.
 
 use std::collections::HashSet;
@@ -37,7 +38,11 @@ impl Hotkey {
                 }
             }
         }
-        if hk.vk == 0 { None } else { Some(hk) }
+        if hk.vk == 0 {
+            None
+        } else {
+            Some(hk)
+        }
     }
 
     pub fn matches(&self, vk: u8, ctrl: bool, alt: bool, shift: bool, win: bool) -> bool {
@@ -239,11 +244,8 @@ impl Settings {
                 "hotkey_convert_selection" => Hotkey::parse(v).map(|h| s.hotkey_convert_selection = h).is_some(),
                 "hotkey_toggle_auto" => Hotkey::parse(v).map(|h| s.hotkey_toggle_auto = h).is_some(),
                 "exclude" => {
-                    s.exclude = v
-                        .split([',', ';'])
-                        .map(|x| x.trim().to_lowercase())
-                        .filter(|x| !x.is_empty())
-                        .collect();
+                    s.exclude =
+                        v.split([',', ';']).map(|x| x.trim().to_lowercase()).filter(|x| !x.is_empty()).collect();
                     true
                 }
                 _ => {
@@ -308,10 +310,7 @@ impl Settings {
 
 /// User exception list: one word per line, `#` comments.
 pub fn parse_exceptions(text: &str) -> HashSet<String> {
-    text.lines()
-        .map(|l| l.trim().to_lowercase())
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .collect()
+    text.lines().map(|l| l.trim().to_lowercase()).filter(|l| !l.is_empty() && !l.starts_with('#')).collect()
 }
 
 #[cfg(test)]
@@ -338,12 +337,14 @@ mod tests {
         let t = Settings::set_in_text(DEFAULT_FILE, "auto_switch", "false");
         assert!(!Settings::parse(&t).0.auto_switch);
 
-        let mut m = Settings::default();
-        m.auto_switch = false;
-        m.sensitivity = 1.5;
-        m.hotkey_convert_word = Hotkey::parse("Ctrl+Shift+F12").unwrap();
-        m.hotkey_toggle_auto = Hotkey::NONE;
-        m.exclude = ["code.exe".to_string()].into_iter().collect();
+        let m = Settings {
+            auto_switch: false,
+            sensitivity: 1.5,
+            hotkey_convert_word: Hotkey::parse("Ctrl+Shift+F12").unwrap(),
+            hotkey_toggle_auto: Hotkey::NONE,
+            exclude: ["code.exe".to_string()].into_iter().collect(),
+            ..Settings::default()
+        };
         let (p, w) = Settings::parse(&m.to_text());
         assert!(w.is_empty(), "{w:?}");
         assert!(!p.auto_switch);

@@ -1,6 +1,6 @@
 [package]
 name = "openswitch"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Open-source automatic keyboard layout switcher (EN/RU) for Windows - a Punto Switcher alternative"
 license = "GPL-3.0-or-later"
@@ -26,6 +26,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_System_Ole",
+    "Win32_UI_Accessibility",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_TextServices",
@@ -36,5 +37,12 @@ windows-sys = { version = "0.59", features = [
 opt-level = 3
 lto = true
 codegen-units = 1
-panic = "abort"
+# unwind (not abort): panics are caught at the hook boundary and logged instead of killing the app
+panic = "unwind"
 strip = true
+
+[dependencies]
+log = { version = "0.4", features = ["std"] }
+
+[build-dependencies]
+embed-resource = "3.0.12"
