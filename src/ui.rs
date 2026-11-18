@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, RichText};
 use openswitch::config::{key_choices, Hotkey, Settings};
+use openswitch::i18n::{self, t, Lang};
 
 use crate::sys;
 
@@ -78,15 +79,15 @@ impl SettingsApp {
                 self.saved_words = self.words.clone();
                 self.saved_autostart = self.autostart;
                 let msg = if sys::notify_reload() {
-                    "Сохранено и применено."
+                    t("Saved and applied.")
                 } else {
-                    "Сохранено. OpenSwitch сейчас не запущен — запустите его, чтобы настройки заработали."
+                    t("Saved. OpenSwitch is not running — start it for the settings to take effect.")
                 };
                 self.status = Some((msg.into(), true, Instant::now()));
             }
             (Err(e), _) | (_, Err(e)) => {
                 log::error!("saving settings failed: {e}");
-                self.status = Some((format!("Не удалось сохранить: {e}"), false, Instant::now()));
+                self.status = Some((i18n::f("Could not save: {}", &[&e]), false, Instant::now()));
             }
         }
     }
@@ -96,7 +97,7 @@ impl SettingsApp {
         for i in 0..h.len() {
             for j in i + 1..h.len() {
                 if h[i].vk != 0 && h[i] == h[j] {
-                    return Some("Две команды назначены на одно и то же сочетание клавиш.");
+                    return Some(t("Two commands are assigned to the same key combination."));
                 }
             }
         }
@@ -106,53 +107,67 @@ impl SettingsApp {
     // ---------------------------------------------------------------- tabs
 
     fn tab_general(&mut self, ui: &mut egui::Ui) {
-        section(ui, "Автоматическое исправление");
-        ui.checkbox(&mut self.s.auto_switch, "Исправлять слова, набранные не в той раскладке, и переключать раскладку");
+        section(ui, t("Interface language"));
+        egui::ComboBox::from_id_salt("language").selected_text(language_label(&self.s.language)).width(260.0).show_ui(
+            ui,
+            |ui| {
+                let system = format!("{} ({})", t("System"), i18n::system().native());
+                ui.selectable_value(&mut self.s.language, "system".to_string(), system);
+                for lang in Lang::ALL {
+                    ui.selectable_value(&mut self.s.language, lang.code().to_string(), lang.native());
+                }
+            },
+        );
+
+        section(ui, t("Automatic switching"));
+        ui.checkbox(&mut self.s.auto_switch, t("Fix words typed in the wrong layout and switch the layout"));
         ui.add_enabled_ui(self.s.auto_switch, |ui| {
             ui.indent("auto", |ui| {
-                ui.checkbox(&mut self.s.switch_on_enter, "Проверять слово и при нажатии Enter (не только пробел)");
-                ui.checkbox(&mut self.s.single_letters, "Исправлять однобуквенные слова (d — в, z — я, ш — i)");
+                ui.checkbox(&mut self.s.switch_on_enter, t("Check the word on Enter too (not only on Space)"));
+                ui.checkbox(&mut self.s.single_letters, t("Fix one-letter words (d — в, z — я, ш — i)"));
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.label("Чувствительность:");
-                    ui.label(RichText::new("осторожно").weak());
+                    ui.label(t("Sensitivity:"));
+                    ui.label(RichText::new(t("cautious")).weak());
                     ui.add(egui::Slider::new(&mut self.s.sensitivity, 0.5..=2.0).step_by(0.05).show_value(false));
-                    ui.label(RichText::new("смело").weak());
-                    if (self.s.sensitivity - 1.0).abs() > 0.01 && ui.small_button("по умолчанию").clicked() {
+                    ui.label(RichText::new(t("bold")).weak());
+                    if (self.s.sensitivity - 1.0).abs() > 0.01 && ui.small_button(t("default")).clicked() {
                         self.s.sensitivity = 1.0;
                     }
                 });
             });
         });
 
-        section(ui, "Ручное исправление");
+        section(ui, t("Manual correction"));
         ui.checkbox(
             &mut self.s.double_shift,
-            "Двойное нажатие Shift исправляет последнее слово (удобно без клавиши Pause)",
+            t("Double-press Shift fixes the last word (handy on laptops without Pause)"),
         );
 
-        section(ui, "Система");
-        ui.checkbox(&mut self.autostart, "Запускать OpenSwitch вместе с Windows");
+        section(ui, t("System"));
+        ui.checkbox(&mut self.autostart, t("Start OpenSwitch with Windows"));
 
-        section(ui, "Проверка");
+        section(ui, t("Test"));
         ui.label(
-            RichText::new("Наберите здесь что-нибудь не в той раскладке, например «ghbdtn» и пробел. Работает, пока OpenSwitch запущен (значок в трее).")
-                .weak(),
+            RichText::new(t(
+                "Type something in the wrong layout here, e.g. «ghbdtn» and a space. Works while OpenSwitch is running (tray icon).",
+            ))
+            .weak(),
         );
         ui.add(egui::TextEdit::multiline(&mut self.test_text).desired_rows(3).desired_width(f32::INFINITY));
     }
 
     fn tab_hotkeys(&mut self, ui: &mut egui::Ui) {
-        section(ui, "Горячие клавиши");
+        section(ui, t("Hotkeys"));
         egui::Grid::new("hk").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
             let keys = &self.keys;
-            ui.label("Исправить последнее слово\n(повторно — вернуть как было)");
+            ui.label(t("Fix the last word\n(press again to undo)"));
             hotkey_editor(ui, "hk_word", &mut self.s.hotkey_convert_word, keys);
             ui.end_row();
-            ui.label("Исправить выделенный текст");
+            ui.label(t("Fix selected text"));
             hotkey_editor(ui, "hk_sel", &mut self.s.hotkey_convert_selection, keys);
             ui.end_row();
-            ui.label("Вкл/выкл автопереключение");
+            ui.label(t("Enable/disable auto switching"));
             hotkey_editor(ui, "hk_auto", &mut self.s.hotkey_toggle_auto, keys);
             ui.end_row();
         });
@@ -162,13 +177,12 @@ impl SettingsApp {
         }
         ui.add_space(10.0);
         ui.label(
-            RichText::new(
-                "Если вы отменили автоисправление горячей клавишей, слово запоминается и больше не исправляется \
-                 (см. вкладку «Слова»).\nСочетания с Ctrl+Pause работают тоже (Windows называет их Break).",
-            )
+            RichText::new(t(
+                "If you cancelled an auto fix with the hotkey, the word is remembered and never fixed again (see the «Words» tab).\nCtrl+Pause works too (Windows calls it Break).",
+            ))
             .weak(),
         );
-        if ui.button("Вернуть клавиши по умолчанию").clicked() {
+        if ui.button(t("Restore default keys")).clicked() {
             let d = Settings::default();
             self.s.hotkey_convert_word = d.hotkey_convert_word;
             self.s.hotkey_convert_selection = d.hotkey_convert_selection;
@@ -177,22 +191,24 @@ impl SettingsApp {
     }
 
     fn tab_programs(&mut self, ui: &mut egui::Ui) {
-        section(ui, "Программы без автопереключения");
+        section(ui, t("Programs without auto switching"));
         ui.label(
-            RichText::new("В этих программах слова не исправляются сами, но горячие клавиши работают. Удобно для терминалов, редакторов кода и игр.")
-                .weak(),
+            RichText::new(t(
+                "Words are not fixed automatically in these programs, but hotkeys work. Handy for terminals, code editors and games.",
+            ))
+            .weak(),
         );
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             let r = ui
-                .add(egui::TextEdit::singleline(&mut self.new_exe).hint_text("например code.exe").desired_width(180.0));
+                .add(egui::TextEdit::singleline(&mut self.new_exe).hint_text(t("e.g. code.exe")).desired_width(180.0));
             let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if ui.button("Добавить").clicked() || enter {
+            if ui.button(t("Add")).clicked() || enter {
                 add_exe(&mut self.s, &self.new_exe);
                 self.new_exe.clear();
             }
             let mut picked: Option<String> = None;
-            egui::ComboBox::from_id_salt("running").selected_text("Выбрать из открытых окон…").width(220.0).show_ui(
+            egui::ComboBox::from_id_salt("running").selected_text(t("Choose from open windows…")).width(220.0).show_ui(
                 ui,
                 |ui| {
                     for e in &self.running {
@@ -205,7 +221,7 @@ impl SettingsApp {
             if let Some(p) = picked {
                 add_exe(&mut self.s, &p);
             }
-            if ui.small_button("Обновить").on_hover_text("Обновить список окон").clicked() {
+            if ui.small_button(t("Refresh")).on_hover_text(t("Update window list")).clicked() {
                 self.running = sys::window_exes();
             }
         });
@@ -216,11 +232,11 @@ impl SettingsApp {
             ui.set_width(ui.available_width());
             egui::ScrollArea::vertical().max_height(260.0).auto_shrink([false, true]).show(ui, |ui| {
                 if list.is_empty() {
-                    ui.label(RichText::new("Список пуст").weak());
+                    ui.label(RichText::new(t("List is empty")).weak());
                 }
                 for e in list {
                     ui.horizontal(|ui| {
-                        if ui.small_button("×").on_hover_text("Убрать").clicked() {
+                        if ui.small_button("×").on_hover_text(t("Remove")).clicked() {
                             self.s.exclude.remove(&e);
                         }
                         ui.label(&e);
@@ -231,17 +247,19 @@ impl SettingsApp {
     }
 
     fn tab_words(&mut self, ui: &mut egui::Ui) {
-        section(ui, "Слова-исключения");
+        section(ui, t("Exception words"));
         ui.label(
-            RichText::new("Эти слова никогда не исправляются автоматически. Пишите их так, как набираете (например «ctx» или «git»).")
-                .weak(),
+            RichText::new(t(
+                "These words are never fixed automatically. Write them the way you type them (e.g. «ctx» or «git»).",
+            ))
+            .weak(),
         );
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             let r =
-                ui.add(egui::TextEdit::singleline(&mut self.new_word).hint_text("новое слово").desired_width(180.0));
+                ui.add(egui::TextEdit::singleline(&mut self.new_word).hint_text(t("new word")).desired_width(180.0));
             let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if ui.button("Добавить").clicked() || enter {
+            if ui.button(t("Add")).clicked() || enter {
                 let wd = self.new_word.trim().to_lowercase();
                 if !wd.is_empty() && !self.words.contains(&wd) {
                     self.words.push(wd);
@@ -250,7 +268,7 @@ impl SettingsApp {
                 self.new_word.clear();
             }
             ui.add_space(12.0);
-            ui.label("Поиск:");
+            ui.label(t("Search:"));
             ui.add(egui::TextEdit::singleline(&mut self.word_filter).desired_width(140.0));
         });
         ui.add_space(6.0);
@@ -260,14 +278,14 @@ impl SettingsApp {
             ui.set_width(ui.available_width());
             egui::ScrollArea::vertical().max_height(260.0).auto_shrink([false, true]).show(ui, |ui| {
                 if self.words.is_empty() {
-                    ui.label(RichText::new("Пока нет ни одного слова").weak());
+                    ui.label(RichText::new(t("No words yet")).weak());
                 }
                 for (i, wd) in self.words.iter().enumerate() {
                     if !filter.is_empty() && !wd.contains(&filter) {
                         continue;
                     }
                     ui.horizontal(|ui| {
-                        if ui.small_button("×").on_hover_text("Убрать").clicked() {
+                        if ui.small_button("×").on_hover_text(t("Remove")).clicked() {
                             remove = Some(i);
                         }
                         ui.label(wd);
@@ -283,17 +301,26 @@ impl SettingsApp {
     fn tab_about(&mut self, ui: &mut egui::Ui) {
         ui.add_space(8.0);
         ui.heading(format!("OpenSwitch {}", env!("CARGO_PKG_VERSION")));
-        ui.label("Свободный автоматический переключатель раскладки EN / RU для Windows.");
+        ui.label(t("Free automatic keyboard layout switcher for Windows."));
         ui.add_space(8.0);
-        ui.label("• Работает без интернета, ничего никуда не отправляет.");
-        ui.label("• Словари: проект wordfreq (CC BY-SA 4.0).");
-        ui.label("• Лицензия: GNU GPL v3.0 или новее.");
+        ui.label(t("• Works offline, sends nothing anywhere."));
+        ui.label(t("• Dictionaries: the wordfreq project (CC BY-SA 4.0)."));
+        ui.label(t("• License: GNU GPL v3.0 or later."));
         ui.add_space(8.0);
-        ui.hyperlink_to("Исходный код на GitHub", "https://github.com/DezFix/OpenSwitch");
+        ui.hyperlink_to(t("Source code on GitHub"), "https://github.com/DezFix/OpenSwitch");
         ui.add_space(8.0);
-        if ui.button("Открыть папку с настройками").clicked() {
+        if ui.button(t("Open settings folder")).clicked() {
             sys::open_path(&sys::data_dir());
         }
+    }
+}
+
+fn language_label(setting: &str) -> String {
+    let name = i18n::resolve(setting).native();
+    if setting.eq_ignore_ascii_case("system") {
+        format!("{} ({name})", t("System"))
+    } else {
+        name.to_string()
     }
 }
 
@@ -337,17 +364,23 @@ fn hotkey_editor(ui: &mut egui::Ui, id: &str, hk: &mut Hotkey, keys: &[(String, 
 
 impl eframe::App for SettingsApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let lang = i18n::resolve(&self.s.language);
+        if lang != i18n::current() {
+            i18n::set(lang);
+            self.keys = key_choices();
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Title(t("OpenSwitch — Settings").into()));
+        }
         egui::Panel::top("tabs").show(ui, |ui| {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                for (t, name) in [
-                    (Tab::General, "Основные"),
-                    (Tab::Hotkeys, "Клавиши"),
-                    (Tab::Programs, "Программы"),
-                    (Tab::Words, "Слова"),
-                    (Tab::About, "О программе"),
+                for (tab, name) in [
+                    (Tab::General, t("General")),
+                    (Tab::Hotkeys, t("Hotkeys")),
+                    (Tab::Programs, t("Programs")),
+                    (Tab::Words, t("Words")),
+                    (Tab::About, t("About")),
                 ] {
-                    ui.selectable_value(&mut self.tab, t, RichText::new(name).size(15.0));
+                    ui.selectable_value(&mut self.tab, tab, RichText::new(name).size(15.0));
                 }
             });
             ui.add_space(4.0);
@@ -357,16 +390,15 @@ impl eframe::App for SettingsApp {
             ui.horizontal(|ui| {
                 let dirty = self.dirty();
                 let can_save = dirty && self.conflicts().is_none();
-                if ui.add_enabled(can_save, egui::Button::new(RichText::new("Сохранить").size(15.0))).clicked()
-                {
+                if ui.add_enabled(can_save, egui::Button::new(RichText::new(t("Save")).size(15.0))).clicked() {
                     self.save();
                 }
-                if ui.add_enabled(dirty, egui::Button::new("Отменить изменения")).clicked() {
+                if ui.add_enabled(dirty, egui::Button::new(t("Revert changes"))).clicked() {
                     self.s = self.saved.clone();
                     self.words = self.saved_words.clone();
                     self.autostart = self.saved_autostart;
                 }
-                if sys::tray_window().is_null() && ui.button("Запустить OpenSwitch").clicked() {
+                if sys::tray_window().is_null() && ui.button(t("Run OpenSwitch")).clicked() {
                     sys::spawn_self(&[]);
                 }
                 if let Some((msg, ok, at)) = &self.status {
@@ -377,7 +409,7 @@ impl eframe::App for SettingsApp {
                         ui.ctx().request_repaint_after(Duration::from_millis(500));
                     }
                 } else if dirty {
-                    ui.label(RichText::new("есть несохранённые изменения").weak());
+                    ui.label(RichText::new(t("unsaved changes")).weak());
                 }
             });
             ui.add_space(8.0);
@@ -432,11 +464,13 @@ pub fn run() {
     use windows_sys::Win32::System::Threading::CreateMutexW;
     use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE};
 
-    const TITLE: &str = "OpenSwitch — настройки";
+    let (settings, _) = sys::load_settings();
+    i18n::set(i18n::resolve(&settings.language));
+    let title = t("OpenSwitch — Settings");
     unsafe {
         let _m = CreateMutexW(std::ptr::null(), 1, sys::w("Local\\OpenSwitch.Settings").as_ptr());
         if GetLastError() == ERROR_ALREADY_EXISTS {
-            let h = FindWindowW(std::ptr::null(), sys::w(TITLE).as_ptr());
+            let h = FindWindowW(std::ptr::null(), sys::w(title).as_ptr());
             if !h.is_null() {
                 ShowWindow(h, SW_RESTORE);
                 SetForegroundWindow(h);
@@ -446,14 +480,14 @@ pub fn run() {
     }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title(TITLE)
+            .with_title(title)
             .with_inner_size([640.0, 560.0])
             .with_min_inner_size([520.0, 420.0])
             .with_icon(app_icon()),
         ..Default::default()
     };
     if let Err(e) = eframe::run_native(
-        TITLE,
+        title,
         options,
         Box::new(|cc| {
             setup_fonts(&cc.egui_ctx);
@@ -462,17 +496,15 @@ pub fn run() {
     ) {
         // Typically: no OpenGL 2+ (virtual machines, some RDP sessions, very old drivers).
         log::error!("settings window failed to start: {e}");
-        let text = format!(
-            "Не удалось открыть окно настроек:\n{e}\n\n\
-             Скорее всего, видеодрайвер не поддерживает OpenGL 2 (бывает в виртуальных машинах и по RDP).\n\
-             Настройки можно изменить вручную в файле:\n{}",
-            sys::settings_path().display()
+        let text = i18n::f(
+            "Could not open the settings window:\n{}\n\nMost likely the video driver does not support OpenGL 2 (happens in virtual machines and over RDP).\nYou can edit the settings manually in the file:\n{}",
+            &[&e, &sys::settings_path().display()],
         );
         unsafe {
             windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW(
                 std::ptr::null_mut(),
                 sys::w(&text).as_ptr(),
-                sys::w(TITLE).as_ptr(),
+                sys::w(title).as_ptr(),
                 windows_sys::Win32::UI::WindowsAndMessaging::MB_ICONERROR,
             );
         }

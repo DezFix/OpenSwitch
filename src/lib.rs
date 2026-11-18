@@ -2,4 +2,5 @@
 pub mod config;
 pub mod detect;
 pub mod engine;
+pub mod i18n;
 pub mod layout;

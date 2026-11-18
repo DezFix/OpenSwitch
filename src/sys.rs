@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 
 use openswitch::config::{parse_exceptions, Settings, DEFAULT_FILE};
+use openswitch::i18n;
 use openswitch::layout::{KeyMap, Lang};
 
 use windows_sys::Win32::Foundation::*;
@@ -76,7 +77,7 @@ pub fn load_settings() -> (Settings, Vec<String>) {
     let p = settings_path();
     match std::fs::read_to_string(&p) {
         Ok(t) => Settings::parse(&t),
-        Err(e) => (Settings::default(), vec![format!("не удалось прочитать {}: {e}", p.display())]),
+        Err(e) => (Settings::default(), vec![i18n::f("could not read {}: {}", &[&p.display(), &e])]),
     }
 }
 

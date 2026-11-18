@@ -17,6 +17,7 @@ use std::time::Instant;
 
 use openswitch::detect::Detector;
 use openswitch::engine::{Action, Engine};
+use openswitch::i18n::{self, t};
 use openswitch::layout::{guess_text_lang, Lang, Layouts};
 
 use crate::clipboard;
@@ -698,11 +699,7 @@ unsafe fn update_tray(app: &mut App, force: bool, add: bool) {
     nid.hIcon = icon;
     copy_tip(
         &mut nid.szTip,
-        if auto {
-            "OpenSwitch — автопереключение включено"
-        } else {
-            "OpenSwitch — автопереключение выключено"
-        },
+        if auto { t("OpenSwitch — auto switching is on") } else { t("OpenSwitch — auto switching is off") },
     );
     Shell_NotifyIconW(if add { NIM_ADD } else { NIM_MODIFY }, &nid);
     if !app.icon.is_null() {
@@ -730,6 +727,7 @@ fn set_auto(on: bool) {
 fn reload() -> Vec<String> {
     let (settings, warnings) = sys::load_settings();
     log::info!("settings reloaded ({} warnings)", warnings.len());
+    i18n::set(i18n::resolve(&settings.language));
     let exceptions = sys::load_exceptions();
     with_app(|app| {
         app.engine.detector.sensitivity = settings.sensitivity;
@@ -754,17 +752,17 @@ unsafe fn show_menu(hwnd: HWND) {
     let item = |id: usize, text: &str, checked: bool| {
         AppendMenuW(m, MF_STRING | if checked { MF_CHECKED } else { MF_UNCHECKED }, id, w(text).as_ptr());
     };
-    item(ID_SETTINGS, "Настройки…", false);
+    item(ID_SETTINGS, t("Settings…"), false);
     SetMenuDefaultItem(m, ID_SETTINGS as u32, 0);
     AppendMenuW(m, MF_SEPARATOR, 0, null());
-    item(ID_AUTO, "Автопереключение раскладки", auto);
-    item(ID_STARTUP, "Запускать вместе с Windows", sys::startup_enabled());
+    item(ID_AUTO, t("Auto layout switching"), auto);
+    item(ID_STARTUP, t("Start with Windows"), sys::startup_enabled());
     AppendMenuW(m, MF_SEPARATOR, 0, null());
-    item(ID_FOLDER, "Открыть папку настроек", false);
-    item(ID_RELOAD, "Перечитать настройки", false);
-    item(ID_ABOUT, "О программе", false);
+    item(ID_FOLDER, t("Open settings folder"), false);
+    item(ID_RELOAD, t("Reload settings"), false);
+    item(ID_ABOUT, t("About"), false);
     AppendMenuW(m, MF_SEPARATOR, 0, null());
-    item(ID_EXIT, "Выход", false);
+    item(ID_EXIT, t("Exit"), false);
 
     let mut pt = POINT { x: 0, y: 0 };
     GetCursorPos(&mut pt);
@@ -781,30 +779,17 @@ unsafe fn show_menu(hwnd: HWND) {
         ID_RELOAD => {
             let warn = reload();
             if !warn.is_empty() {
-                message_box(hwnd, &format!("Ошибки в settings.ini:\n{}", warn.join("\n")), MB_ICONWARNING);
+                message_box(hwnd, &i18n::f("Errors in settings.ini:\n{}", &[&warn.join("\n")]), MB_ICONWARNING);
             }
         }
         ID_ABOUT => {
             let s = with_app(|a| a.engine.settings.clone()).unwrap_or_default();
+            let double_shift = if s.double_shift { t("Shift Shift (double press) — the same\n") } else { "" };
             message_box(
                 hwnd,
-                &format!(
-                    "OpenSwitch {} — свободный переключатель раскладки EN/RU.\n\
-                     Лицензия GNU GPL v3.\n\n\
-                     {} — исправить последнее слово (ещё раз — вернуть)\n\
-                     {}\
-                     {} — исправить выделенный текст\n\
-                     {} — вкл/выкл автопереключение\n\n\
-                     Клик по значку — вкл/выкл автопереключение.",
-                    env!("CARGO_PKG_VERSION"),
-                    s.hotkey_convert_word,
-                    if s.double_shift {
-                        "Shift Shift (двойное нажатие) — то же самое\n"
-                    } else {
-                        ""
-                    },
-                    s.hotkey_convert_selection,
-                    s.hotkey_toggle_auto,
+                &i18n::f(
+                    "OpenSwitch {} — free EN/RU/UA layout switcher.\nGNU GPL v3 license.\n\n{} — fix the last word (again — undo)\n{}\n{} — fix selected text\n{} — enable/disable auto switching\n\nClick the icon — enable/disable auto switching.",
+                    &[&env!("CARGO_PKG_VERSION"), &s.hotkey_convert_word, &double_shift, &s.hotkey_convert_selection, &s.hotkey_toggle_auto],
                 ),
                 MB_ICONINFORMATION,
             );
@@ -905,6 +890,7 @@ pub fn run() {
         sys::migrate_startup();
 
         let (settings, warnings) = sys::load_settings();
+        i18n::set(i18n::resolve(&settings.language));
         let mut detector = Detector::new();
         detector.never_switch = sys::load_exceptions();
         detector.sensitivity = settings.sensitivity;
@@ -942,7 +928,7 @@ pub fn run() {
             null(),
         );
         if hwnd.is_null() {
-            message_box(null_mut(), "Не удалось создать окно.", MB_ICONERROR);
+            message_box(null_mut(), t("Could not create the window."), MB_ICONERROR);
             return;
         }
         MAIN_HWND.store(hwnd as usize, Ordering::SeqCst);
@@ -984,7 +970,7 @@ pub fn run() {
         install_hooks();
         if KB_HOOK.load(Ordering::SeqCst).is_null() {
             log::error!("SetWindowsHookExW(WH_KEYBOARD_LL) failed: {}", GetLastError());
-            message_box(hwnd, "Не удалось установить перехватчик клавиатуры.", MB_ICONERROR);
+            message_box(hwnd, t("Could not install the keyboard hook."), MB_ICONERROR);
         } else {
             log::info!("keyboard hook installed");
         }
@@ -993,7 +979,7 @@ pub fn run() {
 
         if !warnings.is_empty() {
             log::warn!("settings.ini: {}", warnings.join("; "));
-            message_box(hwnd, &format!("Ошибки в settings.ini:\n{}", warnings.join("\n")), MB_ICONWARNING);
+            message_box(hwnd, &i18n::f("Errors in settings.ini:\n{}", &[&warnings.join("\n")]), MB_ICONWARNING);
         }
 
         let mut msg: MSG = std::mem::zeroed();

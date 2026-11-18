@@ -1,6 +1,6 @@
 [package]
 name = "openswitch"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Open-source automatic keyboard layout switcher (EN/RU) for Windows - a Punto Switcher alternative"
 license = "GPL-3.0-or-later"
@@ -17,6 +17,7 @@ path = "src/main.rs"
 eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts"] }
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
+    "Win32_Globalization",
     "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_System_DataExchange",

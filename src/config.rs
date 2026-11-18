@@ -3,6 +3,8 @@
 
 use std::collections::HashSet;
 
+use crate::i18n::{self, t};
+
 pub const VK_PAUSE: u8 = 0x13;
 pub const VK_CANCEL: u8 = 0x03; // what Ctrl+Pause produces
 
@@ -78,7 +80,7 @@ impl std::fmt::Display for Hotkey {
 /// Keys offered in the settings UI (name, vk). vk 0 = no hotkey.
 pub fn key_choices() -> Vec<(String, u8)> {
     let mut v = vec![
-        ("Нет".to_string(), 0),
+        (t("None").to_string(), 0),
         ("Pause".to_string(), VK_PAUSE),
         ("ScrollLock".to_string(), 0x91),
         ("Insert".to_string(), 0x2D),
@@ -146,6 +148,8 @@ pub struct Settings {
     pub hotkey_convert_word: Hotkey,
     pub hotkey_convert_selection: Hotkey,
     pub hotkey_toggle_auto: Hotkey,
+    /// UI language: `system` (follow Windows), `en`, `ru` or `uk`.
+    pub language: String,
     /// Executables (lowercase file names) where auto switching is disabled.
     pub exclude: HashSet<String>,
 }
@@ -161,6 +165,7 @@ impl Default for Settings {
             hotkey_convert_word: Hotkey { vk: VK_PAUSE, ..Hotkey::NONE },
             hotkey_convert_selection: Hotkey { vk: VK_PAUSE, shift: true, ..Hotkey::NONE },
             hotkey_toggle_auto: Hotkey { vk: VK_PAUSE, alt: true, ..Hotkey::NONE },
+            language: "system".into(),
             exclude: DEFAULT_EXCLUDE.iter().map(|s| s.to_string()).collect(),
         }
     }
@@ -197,6 +202,9 @@ double_shift = true
 # Чувствительность автопереключения: 0.5 (осторожно) ... 2.0 (агрессивно)
 sensitivity = 1.0
 
+# Язык интерфейса: system (как в Windows), en, ru, uk
+language = system
+
 # Исправить последнее слово (повторное нажатие — вернуть обратно)
 hotkey_convert_word = Pause
 
@@ -230,7 +238,7 @@ impl Settings {
                 continue;
             }
             let Some((k, v)) = line.split_once('=') else {
-                warn.push(format!("строка {}: нет '='", n + 1));
+                warn.push(i18n::f("line {}: no '='", &[&(n + 1)]));
                 continue;
             };
             let (k, v) = (k.trim().to_ascii_lowercase(), v.trim());
@@ -240,6 +248,15 @@ impl Settings {
                 "switch_on_enter" => parse_bool(v).map(|b| s.switch_on_enter = b).is_some(),
                 "double_shift" => parse_bool(v).map(|b| s.double_shift = b).is_some(),
                 "sensitivity" => v.parse::<f32>().ok().filter(|x| *x > 0.0).map(|x| s.sensitivity = x).is_some(),
+                "language" => {
+                    let code = v.to_ascii_lowercase();
+                    if code == "system" || i18n::Lang::from_code(&code).is_some() {
+                        s.language = code;
+                        true
+                    } else {
+                        false
+                    }
+                }
                 "hotkey_convert_word" => Hotkey::parse(v).map(|h| s.hotkey_convert_word = h).is_some(),
                 "hotkey_convert_selection" => Hotkey::parse(v).map(|h| s.hotkey_convert_selection = h).is_some(),
                 "hotkey_toggle_auto" => Hotkey::parse(v).map(|h| s.hotkey_toggle_auto = h).is_some(),
@@ -249,12 +266,12 @@ impl Settings {
                     true
                 }
                 _ => {
-                    warn.push(format!("строка {}: неизвестный параметр '{}'", n + 1, k));
+                    warn.push(i18n::f("line {}: unknown option '{}'", &[&(n + 1), &k]));
                     continue;
                 }
             };
             if !ok {
-                warn.push(format!("строка {}: неверное значение для '{}'", n + 1, k));
+                warn.push(i18n::f("line {}: bad value for '{}'", &[&(n + 1), &k]));
             }
         }
         (s, warn)
@@ -273,6 +290,7 @@ impl Settings {
             ("switch_on_enter", b(self.switch_on_enter).to_string()),
             ("double_shift", b(self.double_shift).to_string()),
             ("sensitivity", format!("{:.2}", self.sensitivity)),
+            ("language", self.language.clone()),
             ("hotkey_convert_word", self.hotkey_convert_word.to_string()),
             ("hotkey_convert_selection", self.hotkey_convert_selection.to_string()),
             ("hotkey_toggle_auto", self.hotkey_toggle_auto.to_string()),
@@ -316,6 +334,17 @@ pub fn parse_exceptions(text: &str) -> HashSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn language_setting() {
+        let (s, w) = Settings::parse(DEFAULT_FILE);
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(s.language, "system");
+        let uk = Settings::set_in_text(DEFAULT_FILE, "language", "uk");
+        assert_eq!(Settings::parse(&uk).0.language, "uk");
+        let bad = Settings::set_in_text(DEFAULT_FILE, "language", "de");
+        assert!(!Settings::parse(&bad).1.is_empty());
+    }
 
     #[test]
     fn hotkeys() {
