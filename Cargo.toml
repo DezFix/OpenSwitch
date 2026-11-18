@@ -1,6 +1,6 @@
 [package]
 name = "openswitch"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 description = "Open-source automatic keyboard layout switcher (EN/RU) for Windows - a Punto Switcher alternative"
 license = "GPL-3.0-or-later"

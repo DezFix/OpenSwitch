@@ -5,7 +5,8 @@ Outputs into data/:
   en_words.txt / ru_words.txt  - dictionary, one word per line, most frequent first
   en_tri.bin  / ru_tri.bin     - dense table of i16 log-probabilities (x100) of
                                  P(c3 | c1 c2) over the language alphabet + word boundary
-Run:  python tools/gen_data.py
+Run:  python tools/gen_data.py            (all languages)
+      python tools/gen_data.py uk         (only some)
 """
 import math, os, re, struct, sys
 import wordfreq
@@ -18,10 +19,12 @@ LANGS = {
     # boundary symbol is index 0
     'en': ' ' + "abcdefghijklmnopqrstuvwxyz'",
     'ru': ' ' + 'абвгдежзийклмнопрстуфхцчшщъыьэюя',
+    'uk': ' ' + "абвгґдеєжзиіїйклмнопрстуфхцчшщьюя'",
 }
 WORD_RE = {
     'en': re.compile(r"^[a-z]+(?:'[a-z]+)?$"),
     'ru': re.compile(r'^[а-я]+$'),
+    'uk': re.compile(r"^[абвгґдеєжзиіїйклмнопрстуфхцчшщьюя]+(?:'[абвгґдеєжзиіїйклмнопрстуфхцчшщьюя]+)?$"),
 }
 
 def norm(lang, w):
@@ -29,12 +32,15 @@ def norm(lang, w):
     if lang == 'ru':
         w = w.replace('ё', 'е')
     else:
-        w = w.replace('’', "'")
+        w = w.replace('’', "'").replace('ʼ', "'")
     return w
 
 def main():
     os.makedirs(OUT, exist_ok=True)
+    only = sys.argv[1:]  # e.g. `python tools/gen_data.py uk` regenerates one language
     for lang, alpha in LANGS.items():
+        if only and lang not in only:
+            continue
         rx = WORD_RE[lang]
         words, seen = [], set()
         for w in wordfreq.iter_wordlist(lang, wordlist='large'):

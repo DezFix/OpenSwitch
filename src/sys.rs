@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 
 use openswitch::config::{parse_exceptions, Settings, DEFAULT_FILE};
-use openswitch::layout::Lang;
+use openswitch::layout::{KeyMap, Lang};
 
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::System::Registry::*;
@@ -243,12 +243,99 @@ pub fn window_exes() -> Vec<String> {
 
 // ---------------------------------------------------------------- keyboard layouts
 
+/// Primary language id of a keyboard layout handle (low 10 bits of the language word).
+fn primary_lang(hkl: HKL) -> usize {
+    (hkl as usize) & 0x3FF
+}
+
+/// Which side of the pair a layout is on. All Cyrillic layouts we support (Russian,
+/// Ukrainian, Belarusian, including customised ones) count as `Lang::Ru`.
 pub fn lang_of_hkl(hkl: HKL) -> Option<Lang> {
-    match (hkl as usize) & 0x3FF {
+    match primary_lang(hkl) {
         0x09 => Some(Lang::En),
-        0x19 => Some(Lang::Ru),
+        0x19 | 0x22 | 0x23 => Some(Lang::Ru),
         _ => None,
     }
+}
+
+/// Is this a Ukrainian layout (the Ukrainian dictionary is then used too)?
+pub fn is_ukrainian(hkl: HKL) -> bool {
+    primary_lang(hkl) == 0x22
+}
+
+/// Short code for the tray icon.
+pub fn layout_code(hkl: HKL) -> &'static str {
+    match primary_lang(hkl) {
+        0x09 => "EN",
+        0x19 => "RU",
+        0x22 => "UA",
+        0x23 => "BY",
+        _ => "··",
+    }
+}
+
+/// Virtual keys whose characters we read from a layout: letters and the punctuation keys that
+/// carry letters in Cyrillic layouts (OEM 1-8 and the extra ISO key).
+const MAPPED_KEYS: &[u8] = &[
+    b'A', b'B', b'C', b'D', b'E', b'F', b'G', b'H', b'I', b'J', b'K', b'L', b'M', b'N', b'O', b'P', b'Q', b'R', b'S',
+    b'T', b'U', b'V', b'W', b'X', b'Y', b'Z', 0xBA, 0xBB, 0xBC, 0xBD, 0xBE, 0xBF, 0xC0, 0xDB, 0xDC, 0xDD, 0xDE, 0xDF,
+    0xE2,
+];
+
+/// Character that `vk` types in layout `hkl` with the given Shift / CapsLock state.
+fn key_char(vk: u8, hkl: HKL, shift: bool, caps: bool) -> Option<char> {
+    let mut state = [0u8; 256];
+    if shift {
+        state[VK_SHIFT as usize] = 0x80;
+        state[VK_LSHIFT as usize] = 0x80;
+    }
+    if caps {
+        state[VK_CAPITAL as usize] = 0x01;
+    }
+    let mut buf = [0u16; 8];
+    unsafe {
+        let sc = MapVirtualKeyExW(vk as u32, MAPVK_VK_TO_VSC, hkl);
+        // Flag 0x4: do not change the keyboard state (no dead-key side effects), Windows 10 1607+.
+        let n = ToUnicodeEx(vk as u32, sc, state.as_ptr(), buf.as_mut_ptr(), buf.len() as i32, 0x4, hkl);
+        if n < 0 {
+            // Dead key. On older Windows the flag is ignored: flush the pending dead key.
+            let space = MapVirtualKeyExW(VK_SPACE as u32, MAPVK_VK_TO_VSC, hkl);
+            ToUnicodeEx(VK_SPACE as u32, space, [0u8; 256].as_ptr(), buf.as_mut_ptr(), buf.len() as i32, 0x4, hkl);
+            return None;
+        }
+        if n != 1 {
+            return None;
+        }
+    }
+    char::from_u32(buf[0] as u32).filter(|c| !c.is_control())
+}
+
+/// Read the key -> character map of an installed layout, so that customised layouts
+/// (e.g. Ukrainian with Russian letters added) convert correctly.
+/// Falls back to the built-in table if the layout looks broken.
+pub fn read_keymap(hkl: HKL, lang: Lang) -> KeyMap {
+    let mut m = KeyMap::empty();
+    for &vk in MAPPED_KEYS {
+        let normal = key_char(vk, hkl, false, false);
+        let shifted = key_char(vk, hkl, true, false);
+        let with_caps = key_char(vk, hkl, false, true);
+        let caps_like_shift = with_caps.is_some() && with_caps == shifted && shifted != normal;
+        m.set(vk, normal, shifted, caps_like_shift);
+    }
+    if m.letter_count() < 20 {
+        log::warn!("layout {:#x}: only {} letter keys, using the built-in table", hkl as usize, m.letter_count());
+        return KeyMap::builtin(lang);
+    }
+    m
+}
+
+/// Keyboard layout of the focused thread of `fg`.
+pub fn current_hkl(fg: HWND) -> HKL {
+    if fg.is_null() {
+        return null_mut();
+    }
+    let (_, tid) = focus_target(fg);
+    unsafe { GetKeyboardLayout(tid) }
 }
 
 /// Focused window inside the foreground window and its thread id.
@@ -266,11 +353,7 @@ pub fn focus_target(fg: HWND) -> (HWND, u32) {
 }
 
 pub fn current_lang(fg: HWND) -> Option<Lang> {
-    if fg.is_null() {
-        return None;
-    }
-    let (_, tid) = focus_target(fg);
-    lang_of_hkl(unsafe { GetKeyboardLayout(tid) })
+    lang_of_hkl(current_hkl(fg))
 }
 
 pub fn installed_layouts() -> Vec<HKL> {
@@ -286,11 +369,11 @@ pub fn installed_layouts() -> Vec<HKL> {
     }
 }
 
-/// Ask the foreground window to switch layout (fast path, works in most programs).
-pub fn request_layout(lang: Lang) {
-    let Some(hkl) = installed_layouts().into_iter().find(|h| lang_of_hkl(*h) == Some(lang)) else {
+/// Ask the foreground window to switch to layout `hkl` (fast path, works in most programs).
+pub fn request_layout(hkl: HKL) {
+    if hkl.is_null() {
         return;
-    };
+    }
     unsafe {
         let fg = GetForegroundWindow();
         if fg.is_null() {

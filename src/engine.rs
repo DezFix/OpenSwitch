@@ -4,7 +4,7 @@
 
 use crate::config::Settings;
 use crate::detect::Detector;
-use crate::layout::{is_word_key, render, KeyStroke, Lang};
+use crate::layout::{KeyStroke, Lang};
 
 pub const VK_BACK: u8 = 0x08;
 pub const VK_RETURN: u8 = 0x0D;
@@ -150,7 +150,7 @@ impl Engine {
 
     /// Text of the current word as it is displayed (for UI / debugging).
     pub fn current_word(&self) -> Option<String> {
-        self.word.as_ref().map(|w| render(&w.keys, w.shown_lang))
+        self.word.as_ref().map(|w| self.detector.layouts.render(&w.keys, w.shown_lang))
     }
 
     fn effective_lang(&mut self, layout: Option<Lang>, now: u64) -> Option<Lang> {
@@ -287,7 +287,7 @@ impl Engine {
             return Output::pass();
         }
 
-        if is_word_key(vk) {
+        if self.detector.layouts.is_word_key(vk) {
             let ks = KeyStroke { vk, shift, caps: self.caps };
             match &mut self.word {
                 Some(w) if w.trailing == 0 && w.shown_lang == lang => w.keys.push(ks),
@@ -328,7 +328,7 @@ impl Engine {
             if v.switch {
                 let from = w.shown_lang;
                 let to = from.other();
-                let n = render(&w.keys, from).chars().count();
+                let n = self.detector.layouts.render(&w.keys, from).chars().count();
                 w.shown_lang = to;
                 w.auto = true;
                 w.trailing = if vk == VK_SPACE { 1 } else { 0 };
@@ -337,7 +337,7 @@ impl Engine {
                     swallow: true,
                     actions: vec![
                         Action::Backspace(n),
-                        Action::Type(render(&w.keys, to)),
+                        Action::Type(self.detector.layouts.render(&w.keys, to)),
                         Action::Tap(vk),
                         Action::SwitchLayout(to),
                     ],
@@ -359,13 +359,13 @@ impl Engine {
         }
         let from = w.shown_lang;
         let to = from.other();
-        let n = render(&w.keys, from).chars().count() + w.trailing;
-        let mut text = render(&w.keys, to);
+        let n = self.detector.layouts.render(&w.keys, from).chars().count() + w.trailing;
+        let mut text = self.detector.layouts.render(&w.keys, to);
         text.push_str(&" ".repeat(w.trailing));
         let mut actions = vec![Action::Backspace(n), Action::Type(text), Action::SwitchLayout(to)];
         if w.auto && to == w.typed_lang {
             // The user reverted an automatic correction: never touch this word again.
-            let word = render(&w.keys, w.typed_lang).to_lowercase();
+            let word = self.detector.layouts.render(&w.keys, w.typed_lang).to_lowercase();
             self.detector.never_switch.insert(word.clone());
             actions.push(Action::AddException(word));
             w.auto = false;
@@ -453,5 +453,35 @@ mod tests {
         e.on_key(VK_LSHIFT, true, t + 200, Some(Lang::Ru), true);
         let o = e.on_key(VK_LSHIFT, false, t + 260, Some(Lang::Ru), true);
         assert_eq!(o.actions[1], Action::Type("hello ".into()));
+    }
+
+    #[test]
+    fn cyrillic_side_custom_layout() {
+        use crate::layout::{KeyMap, Layouts};
+        // A Ukrainian layout with і on S: typing "love" there must still become English.
+        let mut d = Detector::new();
+        d.set_ukrainian(true);
+        let mut ru = KeyMap::builtin(Lang::Ru);
+        ru.set(b'S', Some('і'), Some('І'), true);
+        d.layouts = Layouts { en: KeyMap::builtin(Lang::En), ru };
+        let mut e = Engine::new(d, Settings::default());
+        let mut t = 0;
+        for k in e.detector.layouts.keys_for_text("дщму", Lang::Ru).unwrap() {
+            e.on_key(k.vk, true, t, Some(Lang::Ru), true);
+            e.on_key(k.vk, false, t, Some(Lang::Ru), true);
+            t += 50;
+        }
+        let o = e.on_key(VK_SPACE, true, t, Some(Lang::Ru), true);
+        assert_eq!(o.actions[1], Action::Type("love".into()));
+        assert_eq!(o.actions[3], Action::SwitchLayout(Lang::En));
+        // and "ghbdsn" typed in English becomes Ukrainian "привіт"
+        t += 1000;
+        for k in e.detector.layouts.keys_for_text("ghbdsn", Lang::En).unwrap() {
+            e.on_key(k.vk, true, t, Some(Lang::En), true);
+            e.on_key(k.vk, false, t, Some(Lang::En), true);
+            t += 50;
+        }
+        let o = e.on_key(VK_SPACE, true, t, Some(Lang::En), true);
+        assert_eq!(o.actions[1], Action::Type("привіт".into()));
     }
 }

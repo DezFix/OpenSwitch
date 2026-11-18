@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use openswitch::detect::Detector;
 use openswitch::engine::{Action, Engine};
-use openswitch::layout::{flip_text, guess_text_lang, Lang};
+use openswitch::layout::{guess_text_lang, Lang, Layouts};
 
 use crate::clipboard;
 use crate::sys::{self, w, APP_NAME, OUR_MARK, WINDOW_CLASS, WM_RELOAD};
@@ -36,6 +36,7 @@ const WM_TRAY: u32 = WM_APP + 1;
 const WM_TOGGLE_AUTO: u32 = WM_APP + 2;
 const WM_SWITCH_LAYOUT: u32 = WM_APP + 4;
 const WM_FOREGROUND: u32 = WM_APP + 5;
+const WM_LAYOUT_SEEN: u32 = WM_APP + 6;
 const TIMER_ICON: usize = 1;
 const TIMER_REHOOK: usize = 2;
 const TIMER_VERIFY: usize = 3;
@@ -69,7 +70,11 @@ struct App {
     fg_excluded: bool,
     /// False between a foreground change seen by the hook and the program name lookup.
     fg_known: bool,
-    icon_state: Option<(Option<Lang>, bool)>,
+    /// What the tray icon shows: layout code (EN/RU/UA/...), its side, auto switching on/off.
+    icon_state: Option<(&'static str, Option<Lang>, bool)>,
+    /// The layout used for each side of the pair: `[En, Ru]`. Updated whenever the user
+    /// is seen typing in another layout of the same side (e.g. a custom Ukrainian layout).
+    hkl: [HKL; 2],
     icon: HICON,
     taskbar_created: u32,
     pending: Option<Pending>,
@@ -155,10 +160,11 @@ fn switch_layout(lang: Lang) {
     if fg.is_null() || sys::current_lang(fg) == Some(lang) {
         return;
     }
-    if !sys::installed_layouts().iter().any(|h| sys::lang_of_hkl(*h) == Some(lang)) {
+    let Some(target) = target_hkl(lang) else {
+        log::info!("no {lang:?} layout installed, cannot switch");
         with_app(|a| a.engine.cancel_forced());
         return;
-    }
+    };
     let mode = with_app(|a| match &a.fg_exe {
         Some(e) if a.unreliable_apps.contains(e) => 2,
         Some(e) if a.slow_apps.contains(e) => 1,
@@ -169,11 +175,11 @@ fn switch_layout(lang: Lang) {
     match mode {
         2 => {
             // We cannot read this program's layout reliably: just ask and hope.
-            sys::request_layout(lang);
+            sys::request_layout(target);
             return;
         }
         1 => sys::press_system_toggle(),
-        _ => sys::request_layout(lang),
+        _ => sys::request_layout(target),
     }
     let hwnd = with_app(|a| {
         a.pending = Some(Pending { lang, fg, presses: mode, before });
@@ -181,6 +187,78 @@ fn switch_layout(lang: Lang) {
     });
     if let Some(h) = hwnd {
         unsafe { SetTimer(h, TIMER_VERIFY, VERIFY_MS, None) };
+    }
+}
+
+/// The installed layout to switch to for `lang`: the one the user last typed in on that
+/// side, otherwise the first installed one.
+fn target_hkl(lang: Lang) -> Option<HKL> {
+    let installed = sys::installed_layouts();
+    let chosen = with_app(|a| a.hkl[lang_index(lang)]).unwrap_or(null_mut());
+    if !chosen.is_null() && installed.contains(&chosen) {
+        return Some(chosen);
+    }
+    installed.into_iter().find(|h| sys::lang_of_hkl(*h) == Some(lang))
+}
+
+fn lang_index(l: Lang) -> usize {
+    match l {
+        Lang::En => 0,
+        Lang::Ru => 1,
+    }
+}
+
+/// Use `hkl` for its side of the pair: read its key map so conversion matches the layout
+/// the user really has. Runs on the message loop (never inside the keyboard hook).
+fn use_layout(hkl: HKL) {
+    let Some(lang) = sys::lang_of_hkl(hkl) else { return };
+    let map = sys::read_keymap(hkl, lang);
+    log::info!(
+        "{lang:?} side: layout {} ({:#010x}), {} letter keys",
+        sys::layout_code(hkl),
+        hkl as usize,
+        map.letter_count()
+    );
+    with_app(|a| {
+        a.hkl[lang_index(lang)] = hkl;
+        match lang {
+            Lang::En => a.engine.detector.layouts.en = map,
+            Lang::Ru => {
+                a.engine.detector.layouts.ru = map;
+                let uk = sys::is_ukrainian(hkl);
+                if uk != a.engine.detector.ukrainian() {
+                    log::info!("Ukrainian dictionary {}", if uk { "on" } else { "off" });
+                    a.engine.detector.set_ukrainian(uk);
+                }
+            }
+        }
+    });
+}
+
+/// At start-up: pick a layout for each side (the active one first) and read their maps.
+fn init_layouts() {
+    let active = sys::current_hkl(unsafe { GetForegroundWindow() });
+    let installed = sys::installed_layouts();
+    log::info!(
+        "installed layouts: {}",
+        installed
+            .iter()
+            .map(|h| format!("{} {:#010x}", sys::layout_code(*h), *h as usize))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    for lang in [Lang::En, Lang::Ru] {
+        let pick = if sys::lang_of_hkl(active) == Some(lang) {
+            Some(active)
+        } else {
+            installed.iter().copied().find(|h| sys::lang_of_hkl(*h) == Some(lang))
+        };
+        match pick {
+            Some(h) => use_layout(h),
+            None => log::warn!(
+                "no {lang:?} layout installed: automatic switching needs both an English and a Cyrillic layout"
+            ),
+        }
     }
 }
 
@@ -332,7 +410,16 @@ fn handle_key(vk: u8, down: bool) -> bool {
             app.fg_known = false;
             unsafe { PostMessageW(app.hwnd, WM_FOREGROUND, fg as usize, 0) };
         }
-        let layout = sys::current_lang(fg);
+        let hkl = sys::current_hkl(fg);
+        let layout = sys::lang_of_hkl(hkl);
+        if let Some(l) = layout {
+            if hkl != app.hkl[lang_index(l)] {
+                // The user types in another layout of the same side (e.g. switched from
+                // Russian to Ukrainian): read its key map on the message loop.
+                app.hkl[lang_index(l)] = hkl;
+                unsafe { PostMessageW(app.hwnd, WM_LAYOUT_SEEN, hkl as usize, 0) };
+            }
+        }
         if down && !is_modifier(vk) {
             app.engine.sync_modifiers(
                 is_down(VK_LSHIFT),
@@ -365,8 +452,9 @@ fn perform(actions: Vec<Action>, hwnd: HWND) {
             },
             Action::ConvertSelection => {
                 if !SELECTION_BUSY.swap(true, Ordering::SeqCst) {
-                    std::thread::spawn(|| {
-                        if catch_unwind(convert_selection).is_err() {
+                    let layouts = with_app(|a| a.engine.detector.layouts.clone()).unwrap_or_default();
+                    std::thread::spawn(move || {
+                        if catch_unwind(AssertUnwindSafe(|| convert_selection(&layouts))).is_err() {
                             log::error!("convert_selection panicked");
                         }
                         SELECTION_BUSY.store(false, Ordering::SeqCst);
@@ -425,7 +513,7 @@ unsafe fn remove_hooks() {
 
 /// Runs on a worker thread: copy selection, convert, type it back, re-select it, and put the
 /// user's clipboard back exactly as it was (all formats, not only text).
-fn convert_selection() {
+fn convert_selection(layouts: &Layouts) {
     unsafe {
         // Wait until the user releases the hotkey modifiers (up to 1 s) so Ctrl+C is clean.
         for _ in 0..50 {
@@ -476,7 +564,7 @@ fn convert_selection() {
             return;
         }
         let target = guess_text_lang(&text).other();
-        let converted = flip_text(&text);
+        let converted = layouts.flip_text(&text);
         let mut inputs = Vec::new();
         push_text(&mut inputs, &converted);
         let len = converted.chars().filter(|c| *c != '\r').count();
@@ -581,14 +669,19 @@ fn copy_tip(dst: &mut [u16; 128], s: &str) {
 unsafe fn update_tray(app: &mut App, force: bool, add: bool) {
     let fg = GetForegroundWindow();
     // When our own menu/window is active keep showing the previous layout.
-    let lang = if fg == app.hwnd { app.icon_state.and_then(|s| s.0) } else { sys::current_lang(fg) };
     let auto = app.engine.settings.auto_switch;
-    let state = (lang, auto);
+    let (text, lang) = match app.icon_state {
+        Some((code, lang, _)) if fg == app.hwnd => (code, lang),
+        _ => {
+            let hkl = sys::current_hkl(fg);
+            (sys::layout_code(hkl), sys::lang_of_hkl(hkl))
+        }
+    };
+    let state = (text, lang, auto);
     if !force && app.icon_state == Some(state) {
         return;
     }
     app.icon_state = Some(state);
-    let text = lang.map(|l| l.code()).unwrap_or("··");
     // colours are 0x00BBGGRR
     let bg = match (auto, lang) {
         (false, _) => 0x0080_8080,
@@ -757,6 +850,10 @@ unsafe fn wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
             switch_layout(wparam_to_lang(wparam));
             0
         }
+        WM_LAYOUT_SEEN => {
+            use_layout(wparam as HKL);
+            0
+        }
         WM_FOREGROUND => {
             // Posted by the keyboard hook; ignore it if the user has switched again since.
             let fg = wparam as HWND;
@@ -860,6 +957,7 @@ pub fn run() {
                 fg_excluded: false,
                 fg_known: false,
                 icon_state: None,
+                hkl: [null_mut(); 2],
                 icon: null_mut(),
                 taskbar_created,
                 pending: None,
@@ -869,6 +967,7 @@ pub fn run() {
         });
         with_app(|app| update_tray(app, true, true));
         set_foreground(GetForegroundWindow());
+        init_layouts();
         // Foreground changes are reported here, out of context, on this thread's message loop.
         let fg_hook = SetWinEventHook(
             EVENT_SYSTEM_FOREGROUND,

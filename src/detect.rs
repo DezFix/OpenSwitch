@@ -8,32 +8,44 @@
 //! The thresholds below were tuned on frequency-weighted samples of real words
 //! (see `examples/eval.rs`).
 
-use crate::layout::{render, KeyStroke, Lang};
+use crate::layout::{KeyStroke, Lang, Layouts};
 use std::collections::{HashMap, HashSet};
 
 static EN_WORDS: &str = include_str!("../data/en_words.txt");
 static RU_WORDS: &str = include_str!("../data/ru_words.txt");
+static UK_WORDS: &str = include_str!("../data/uk_words.txt");
 static EN_TRI: &[u8] = include_bytes!("../data/en_tri.bin");
 static RU_TRI: &[u8] = include_bytes!("../data/ru_tri.bin");
+static UK_TRI: &[u8] = include_bytes!("../data/uk_tri.bin");
 
 const EN_ALPHA: &str = " abcdefghijklmnopqrstuvwxyz'";
 const RU_ALPHA: &str = " абвгдежзийклмнопрстуфхцчшщъыьэюя";
+const UK_ALPHA: &str = " абвгґдеєжзиіїйклмнопрстуфхцчшщьюя'";
+
+/// A language with its own dictionary and character model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Model {
+    En,
+    Ru,
+    Uk,
+}
 
 pub struct LangModel {
-    lang: Lang,
+    model: Model,
     ranks: HashMap<&'static str, u32>,
     alpha: Vec<char>,
     tri: &'static [u8],
 }
 
 impl LangModel {
-    fn new(lang: Lang) -> Self {
-        let (words, alpha, tri) = match lang {
-            Lang::En => (EN_WORDS, EN_ALPHA, EN_TRI),
-            Lang::Ru => (RU_WORDS, RU_ALPHA, RU_TRI),
+    pub fn new(model: Model) -> Self {
+        let (words, alpha, tri) = match model {
+            Model::En => (EN_WORDS, EN_ALPHA, EN_TRI),
+            Model::Ru => (RU_WORDS, RU_ALPHA, RU_TRI),
+            Model::Uk => (UK_WORDS, UK_ALPHA, UK_TRI),
         };
         let ranks = words.lines().filter(|l| !l.is_empty()).enumerate().map(|(i, w)| (w, i as u32 + 1)).collect();
-        LangModel { lang, ranks, alpha: alpha.chars().collect(), tri }
+        LangModel { model, ranks, alpha: alpha.chars().collect(), tri }
     }
 
     fn idx(&self, c: char) -> Option<usize> {
@@ -46,10 +58,20 @@ impl LangModel {
         i16::from_le_bytes([self.tri[i * 2], self.tri[i * 2 + 1]]) as f32 / 100.0
     }
 
-    /// Normalise a rendered word for this language: lowercase, ё->е, strip edge punctuation.
-    /// Returns None if the word contains characters that cannot be inside a word of this language.
+    /// Normalise a rendered word for this language: lowercase, ё->е (Russian), ’->' (Ukrainian),
+    /// strip edge punctuation. Returns None if the word contains characters that cannot be
+    /// inside a word of this language.
     pub fn clean(&self, s: &str) -> Option<String> {
-        let mut w: String = s.chars().flat_map(|c| c.to_lowercase()).map(|c| if c == 'ё' { 'е' } else { c }).collect();
+        let ru = self.model == Model::Ru;
+        let mut w: String = s
+            .chars()
+            .flat_map(|c| c.to_lowercase())
+            .map(|c| match c {
+                'ё' if ru => 'е',
+                '’' | 'ʼ' => '\'',
+                c => c,
+            })
+            .collect();
         let is_letter = |c: char| c != ' ' && c != '\'' && self.alpha.contains(&c);
         let start = w.find(is_letter)?;
         let end = w.rfind(is_letter)? + w[w.rfind(is_letter)?..].chars().next()?.len_utf8();
@@ -101,8 +123,8 @@ impl LangModel {
         }
     }
 
-    pub fn lang(&self) -> Lang {
-        self.lang
+    pub fn model(&self) -> Model {
+        self.model
     }
 }
 
@@ -131,12 +153,16 @@ pub struct Verdict {
 pub struct Detector {
     en: LangModel,
     ru: LangModel,
+    /// Ukrainian, loaded only when a Ukrainian layout is in use (see `set_ukrainian`).
+    uk: Option<LangModel>,
     /// Words (in the layout they were typed) the user never wants converted.
     pub never_switch: HashSet<String>,
     /// Higher = more aggressive auto switching. 1.0 = default.
     pub sensitivity: f32,
     /// Convert one-letter words like "d" -> "в".
     pub single_letters: bool,
+    /// Key -> character maps of the two layouts.
+    pub layouts: Layouts,
 }
 
 impl Default for Detector {
@@ -148,14 +174,17 @@ impl Default for Detector {
 impl Detector {
     pub fn new() -> Self {
         Detector {
-            en: LangModel::new(Lang::En),
-            ru: LangModel::new(Lang::Ru),
+            en: LangModel::new(Model::En),
+            ru: LangModel::new(Model::Ru),
+            uk: None,
             never_switch: HashSet::new(),
             sensitivity: 1.0,
             single_letters: true,
+            layouts: Layouts::default(),
         }
     }
 
+    /// The model for a side of the pair (the Cyrillic side is Russian here).
     pub fn model(&self, lang: Lang) -> &LangModel {
         match lang {
             Lang::En => &self.en,
@@ -163,11 +192,44 @@ impl Detector {
         }
     }
 
+    /// Also treat the Cyrillic side as Ukrainian (load the Ukrainian dictionary).
+    pub fn set_ukrainian(&mut self, on: bool) {
+        match (on, self.uk.is_some()) {
+            (true, false) => self.uk = Some(LangModel::new(Model::Uk)),
+            (false, true) => self.uk = None,
+            _ => {}
+        }
+    }
+
+    pub fn ukrainian(&self) -> bool {
+        self.uk.is_some()
+    }
+
     /// Decide whether `keys`, typed while layout `cur` was active, were meant for the other layout.
+    ///
+    /// With Ukrainian enabled, the Cyrillic side is checked as Russian and as Ukrainian:
+    /// a Cyrillic word is kept if it is plausible in either language, and English typing is
+    /// converted if the result is a word in either language.
     pub fn check(&self, keys: &[KeyStroke], cur: Lang) -> Verdict {
+        let ru = self.check_with(keys, cur, &self.ru);
+        let Some(uk) = &self.uk else { return ru };
+        let uk = self.check_with(keys, cur, uk);
+        match cur {
+            Lang::Ru if ru.switch && !uk.switch => uk,
+            Lang::Ru => ru,
+            Lang::En if !ru.switch && uk.switch => uk,
+            Lang::En => ru,
+        }
+    }
+
+    fn check_with(&self, keys: &[KeyStroke], cur: Lang, cyr: &LangModel) -> Verdict {
+        let model = |l: Lang| match l {
+            Lang::En => &self.en,
+            Lang::Ru => cyr,
+        };
         let alt = cur.other();
-        let raw_cur = render(keys, cur);
-        let raw_alt = render(keys, alt);
+        let raw_cur = self.layouts.render(keys, cur);
+        let raw_alt = self.layouts.render(keys, alt);
         let mut v = Verdict { switch: false, current: raw_cur.clone(), alternative: raw_alt.clone(), reason: "" };
 
         let key = raw_cur.to_lowercase();
@@ -175,19 +237,20 @@ impl Detector {
             v.reason = "user exception";
             return v;
         }
-        let mc = self.model(cur);
-        let ma = self.model(alt);
+        let mc = model(cur);
+        let ma = model(alt);
         let Some(wa) = ma.clean(&raw_alt) else {
             v.reason = "alt not a word";
             return v;
         };
         let alen = wa.chars().filter(|c| *c != '-').count();
         if alen == 1 && keys.len() == 1 && self.single_letters {
-            // One-letter words: "d" -> "в", "z" -> "я", "ш" -> "i" ...
-            let c = raw_cur.to_lowercase();
-            let hit = match cur {
-                Lang::En => matches!(c.as_str(), "d" | "b" | "c" | "z" | "j" | "e" | "f" | "r"),
-                Lang::Ru => matches!(c.as_str(), "ш" | "ф"),
+            // One-letter words: "d" -> "в", "z" -> "я", "ш" -> "i" ... Decided by the letter it
+            // would become, so it also works with customised layouts.
+            let hit = match (cur, cyr.model) {
+                (Lang::En, Model::Uk) => matches!(wa.as_str(), "в" | "і" | "с" | "я" | "о" | "у" | "а" | "з" | "й"),
+                (Lang::En, _) => matches!(wa.as_str(), "в" | "и" | "с" | "я" | "о" | "у" | "а" | "к"),
+                (Lang::Ru, _) => matches!(wa.as_str(), "i" | "a"),
             };
             v.switch = hit;
             v.reason = "single letter";
@@ -306,6 +369,44 @@ mod tests {
         }
         for w in ["привет", "как", "дела", "не", "я", "сеть", "программа", "ФСБ"] {
             assert!(!sw(&d, w, Lang::Ru), "{w}");
+        }
+    }
+
+    fn ukrainian() -> Detector {
+        use crate::layout::KeyMap;
+        let mut d = Detector::new();
+        d.set_ukrainian(true);
+        let mut ru = KeyMap::builtin(Lang::Ru);
+        ru.set(b'S', Some('і'), Some('І'), true);
+        ru.set(0xDD, Some('ї'), Some('Ї'), true);
+        ru.set(0xDE, Some('є'), Some('Є'), true);
+        ru.set(0xC0, Some('\''), Some('₴'), false);
+        d.layouts = Layouts { en: KeyMap::builtin(Lang::En), ru };
+        d
+    }
+
+    fn sw_l(d: &Detector, text: &str, lang: Lang) -> bool {
+        d.check(&d.layouts.keys_for_text(text, lang).unwrap(), lang).switch
+    }
+
+    #[test]
+    fn ukrainian_layout() {
+        let d = ukrainian();
+        // English typed in the Ukrainian layout -> English
+        for w in ["дщму", "руддщ", "цщкдв", "еуіе"] {
+            assert!(sw_l(&d, w, Lang::Ru), "{w}");
+        }
+        // Ukrainian typed in the English layout -> Ukrainian
+        for w in ["ghbdsn", "vscnj", "ldsxf", "s"] {
+            assert!(sw_l(&d, w, Lang::En), "{w}");
+        }
+        // Real Ukrainian and Russian words stay as they are
+        for w in ["від", "рік", "між", "привіт", "їжак", "інтерв'ю", "також", "привет", "как"]
+        {
+            assert!(!sw_l(&d, w, Lang::Ru), "{w}");
+        }
+        for w in ["hello", "the", "github", "love"] {
+            assert!(!sw_l(&d, w, Lang::En), "{w}");
         }
     }
 }
