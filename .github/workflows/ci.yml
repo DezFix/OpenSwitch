@@ -59,7 +59,8 @@ jobs:
           New-Item -ItemType Directory dist | Out-Null
           Copy-Item target/release/openswitch.exe dist/openswitch.exe
           Compress-Archive -Path target/release/openswitch.exe, LICENSE, README.md -DestinationPath "dist/OpenSwitch-$v-windows-x64.zip"
-          Get-ChildItem dist -File | ForEach-Object {
+          $files = Get-ChildItem dist -File
+          $files | ForEach-Object {
             "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
           } | Out-File -Encoding ascii dist/SHA256SUMS.txt
           Get-Content dist/SHA256SUMS.txt
