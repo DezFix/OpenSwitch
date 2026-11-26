@@ -144,6 +144,9 @@ const RU: &[(&str, &str)] = &[
     ("Fix selected text", "Исправить выделенный текст"),
     ("Enable/disable auto switching", "Вкл/выкл автопереключение"),
     ("Restore default keys", "Вернуть клавиши по умолчанию"),
+    ("Window theme", "Тема окна"),
+    ("Light", "Светлая"),
+    ("Dark", "Тёмная"),
     ("Run as administrator", "Запускать с правами администратора"),
     (
         "Needed to fix typing in programs started as administrator. Windows asks for permission once, then OpenSwitch starts with Windows without asking.",
@@ -336,6 +339,9 @@ const UK: &[(&str, &str)] = &[
     ("Fix selected text", "Виправити виділений текст"),
     ("Enable/disable auto switching", "Увімк./вимк. автоперемикання"),
     ("Restore default keys", "Повернути клавіші типовими"),
+    ("Window theme", "Тема вікна"),
+    ("Light", "Світла"),
+    ("Dark", "Темна"),
     ("Run as administrator", "Запускати з правами адміністратора"),
     (
         "Needed to fix typing in programs started as administrator. Windows asks for permission once, then OpenSwitch starts with Windows without asking.",

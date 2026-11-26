@@ -185,6 +185,8 @@ pub struct Settings {
     pub hotkey_toggle_auto: Hotkey,
     /// UI language: `system` (follow Windows), `en`, `ru` or `uk`.
     pub language: String,
+    /// Colours of the windows: `system` (follow Windows), `light` or `dark`.
+    pub theme: String,
     /// Executables (lowercase file names) where auto switching is disabled.
     pub exclude: HashSet<String>,
     /// Layouts (codes like RU, UA) words are never switched *to* automatically.
@@ -216,6 +218,7 @@ impl Default for Settings {
             hotkey_convert_selection: Hotkey { vk: VK_PAUSE, shift: true, ..Hotkey::NONE },
             hotkey_toggle_auto: Hotkey { vk: VK_PAUSE, alt: true, ..Hotkey::NONE },
             language: "system".into(),
+            theme: "system".into(),
             exclude: DEFAULT_EXCLUDE.iter().map(|s| s.to_string()).collect(),
             disabled_layouts: HashSet::new(),
         }
@@ -233,6 +236,9 @@ const DEFAULT_EXCLUDE: &[&str] = &[
     "keepass.exe",
     "keepassxc.exe",
 ];
+
+/// Values of `theme`.
+pub const THEMES: [&str; 3] = ["system", "light", "dark"];
 
 pub const DEFAULT_FILE: &str = "\
 # OpenSwitch - настройки. Удобнее менять в окне «Настройки» (меню значка в трее).\n# После ручной правки файла: меню в трее -> «Перечитать настройки».
@@ -294,6 +300,9 @@ sensitivity = 1.0
 
 # Язык интерфейса: system (как в Windows), en, ru, uk
 language = system
+
+# Тема окон: system (как в Windows), light (светлая), dark (тёмная)
+theme = system
 
 # Исправить последнее слово (повторное нажатие — вернуть обратно)
 hotkey_convert_word = Pause
@@ -363,6 +372,15 @@ impl Settings {
                         false
                     }
                 }
+                "theme" => {
+                    let v = v.to_ascii_lowercase();
+                    if THEMES.contains(&v.as_str()) {
+                        s.theme = v;
+                        true
+                    } else {
+                        false
+                    }
+                }
                 "hotkey_convert_word" => Hotkey::parse(v).map(|h| s.hotkey_convert_word = h).is_some(),
                 "hotkey_convert_selection" => Hotkey::parse(v).map(|h| s.hotkey_convert_selection = h).is_some(),
                 "hotkey_toggle_auto" => Hotkey::parse(v).map(|h| s.hotkey_toggle_auto = h).is_some(),
@@ -415,6 +433,7 @@ impl Settings {
             ("fix_space", b(self.fix_space).to_string()),
             ("sensitivity", format!("{:.2}", self.sensitivity)),
             ("language", self.language.clone()),
+            ("theme", self.theme.clone()),
             ("hotkey_convert_word", self.hotkey_convert_word.to_string()),
             ("hotkey_convert_selection", self.hotkey_convert_selection.to_string()),
             ("hotkey_toggle_auto", self.hotkey_toggle_auto.to_string()),
@@ -532,6 +551,7 @@ mod tests {
             auto_switch: false,
             skip_passwords: false,
             run_as_admin: true,
+            theme: "dark".into(),
             sensitivity: 1.5,
             hotkey_convert_word: Hotkey::parse("Ctrl+Shift+F12").unwrap(),
             hotkey_toggle_auto: Hotkey::NONE,
@@ -543,6 +563,8 @@ mod tests {
         assert!(!p.auto_switch);
         assert!(!p.skip_passwords);
         assert!(p.run_as_admin && !d.run_as_admin);
+        assert_eq!((p.theme.as_str(), s.theme.as_str()), ("dark", "system"));
+        assert_eq!(Settings::parse("theme = blue").1.len(), 1);
         assert!(d.skip_passwords && s.skip_passwords);
         assert_eq!(p.sensitivity, 1.5);
         assert_eq!(p.hotkey_convert_word, m.hotkey_convert_word);

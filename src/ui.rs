@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Align, Color32, RichText, Sense};
-use openswitch::config::{is_hotkey_key, Hotkey, Settings, SENSITIVITY_PRESETS, VK_CANCEL, VK_PAUSE};
+use openswitch::config::{is_hotkey_key, Hotkey, Settings, SENSITIVITY_PRESETS, THEMES, VK_CANCEL, VK_PAUSE};
 use openswitch::i18n::{self, t, Lang};
 
 use crate::admin::{self, Failure};
@@ -156,6 +156,8 @@ struct SettingsApp {
     window_focused: bool,
     tray_running: bool,
     tray_checked: Instant,
+    /// The theme the window shows now.
+    theme_shown: String,
     /// "Run as administrator" being turned on/off on a worker thread (the wanted state).
     admin_job: Option<(bool, std::thread::JoinHandle<Result<(), Failure>>)>,
 }
@@ -192,6 +194,7 @@ impl SettingsApp {
             window_focused: true,
             tray_running: !sys::tray_window().is_null(),
             tray_checked: Instant::now(),
+            theme_shown: String::new(),
             admin_job: None,
         }
     }
@@ -338,6 +341,19 @@ impl SettingsApp {
 
     fn general(&mut self, ui: &mut egui::Ui, p: &mut Page) {
         p.begin(Section::General);
+        let label = t("Window theme");
+        if p.row(ui, &[label, t("Light"), t("Dark"), "theme"]) {
+            setting_row(ui, label, None, |ui| {
+                egui::ComboBox::from_id_salt("theme").selected_text(theme_label(&self.s.theme)).width(200.0).show_ui(
+                    ui,
+                    |ui| {
+                        for th in THEMES {
+                            ui.selectable_value(&mut self.s.theme, th.to_string(), theme_label(th));
+                        }
+                    },
+                );
+            });
+        }
         let label = t("Interface language");
         if p.row(ui, &[label, "language"]) {
             setting_row(ui, label, None, |ui| {
@@ -887,6 +903,10 @@ impl eframe::App for SettingsApp {
         }
         ctx.request_repaint_after(Duration::from_secs(2));
 
+        if self.theme_shown != self.s.theme {
+            apply_theme(&ctx, &self.s.theme);
+            self.theme_shown = self.s.theme.clone();
+        }
         self.poll_recording(&ctx);
         self.poll_admin(&ctx);
 
@@ -960,6 +980,23 @@ pub(crate) fn module_row(ui: &mut egui::Ui, label: &str, hint: &str, on: &mut bo
     let y = ui.cursor().top();
     let x = ui.max_rect().x_range();
     ui.painter().hline(x, y, ui.visuals().widgets.noninteractive.bg_stroke);
+}
+
+fn theme_label(theme: &str) -> String {
+    match theme {
+        "light" => t("Light").into(),
+        "dark" => t("Dark").into(),
+        _ => t("System").into(),
+    }
+}
+
+/// Light, dark or like Windows (`theme` from settings.ini).
+pub(crate) fn apply_theme(ctx: &egui::Context, theme: &str) {
+    ctx.set_theme(match theme {
+        "light" => egui::ThemePreference::Light,
+        "dark" => egui::ThemePreference::Dark,
+        _ => egui::ThemePreference::System,
+    });
 }
 
 /// On/off switch.

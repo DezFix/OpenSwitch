@@ -260,6 +260,7 @@ pub fn run() {
             return;
         }
     }
+    let theme = settings.theme.clone();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(title)
@@ -273,6 +274,7 @@ pub fn run() {
         options,
         Box::new(|cc| {
             setup_fonts(&cc.egui_ctx);
+            crate::ui::apply_theme(&cc.egui_ctx, &theme);
             Ok(Box::new(SetupApp::new()))
         }),
     ) {
