@@ -1,18 +1,28 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Settings window (`openswitch.exe --settings`), built with egui.
-//! It edits %APPDATA%\OpenSwitch\settings.ini / exceptions.txt and tells the running tray app to reload.
+//!
+//! One scrolling page with all sections; the menu on the left follows the scroll position and
+//! the search box above it filters the rows. Every change is written to
+//! %APPDATA%\OpenSwitch\settings.ini / exceptions.txt right away and the running tray app is
+//! told to reload: there is no "Save" button.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use eframe::egui::{self, Color32, RichText};
-use openswitch::config::{key_choices, Hotkey, Settings};
+use eframe::egui::{self, Align, Color32, RichText, Sense};
+use openswitch::config::{is_hotkey_key, Hotkey, Settings, SENSITIVITY_PRESETS, VK_CANCEL, VK_PAUSE};
 use openswitch::i18n::{self, t, Lang};
 
-use crate::sys;
+use crate::{logging, sys};
 
-#[derive(PartialEq, Clone, Copy)]
-enum Tab {
+const SIDEBAR_WIDTH: f32 = 190.0;
+/// Menu item highlighted after a click while the page scrolls there.
+const JUMP_MS: u64 = 700;
+const RED: Color32 = Color32::from_rgb(0xD0, 0x50, 0x30);
+const GREEN: Color32 = Color32::from_rgb(0x2E, 0x9E, 0x4F);
+
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+enum Section {
     General,
     Hotkeys,
     Programs,
@@ -20,195 +30,418 @@ enum Tab {
     About,
 }
 
+impl Section {
+    const ALL: [Section; 5] = [Section::General, Section::Hotkeys, Section::Programs, Section::Words, Section::About];
+
+    fn title(self) -> &'static str {
+        match self {
+            Section::General => t("General"),
+            Section::Hotkeys => t("Hotkeys"),
+            Section::Programs => t("Programs"),
+            Section::Words => t("Words"),
+            Section::About => t("About"),
+        }
+    }
+}
+
+/// The hotkeys edited in the window, in display order.
+const HOTKEYS: [&str; 3] = ["Fix the last word", "Fix selected text", "Enable/disable auto switching"];
+
+fn hotkey_mut(s: &mut Settings, i: usize) -> &mut Hotkey {
+    match i {
+        0 => &mut s.hotkey_convert_word,
+        1 => &mut s.hotkey_convert_selection,
+        _ => &mut s.hotkey_toggle_auto,
+    }
+}
+
+/// Per-frame state of the page being drawn: search filter, section headers, scroll targets.
+struct Page {
+    /// Lowercase search query.
+    query: String,
+    section: Section,
+    /// The section title matches the query: show all its rows.
+    all: bool,
+    header_drawn: bool,
+    /// Screen y of each drawn section header.
+    tops: Vec<(Section, f32)>,
+    jump: Option<Section>,
+}
+
+impl Page {
+    fn filtering(&self) -> bool {
+        !self.query.is_empty()
+    }
+
+    fn hit(&self, text: &str) -> bool {
+        self.query.is_empty() || text.to_lowercase().contains(&self.query)
+    }
+
+    fn begin(&mut self, section: Section) {
+        self.section = section;
+        self.header_drawn = false;
+        self.all = self.filtering() && self.hit(section.title());
+    }
+
+    /// Should a row with these texts be shown? Draws the section header before the first one,
+    /// so a section with no matching rows disappears entirely.
+    fn row(&mut self, ui: &mut egui::Ui, texts: &[&str]) -> bool {
+        if !(self.all || texts.iter().any(|x| self.hit(x))) {
+            return false;
+        }
+        if !self.header_drawn {
+            self.header_drawn = true;
+            if !self.tops.is_empty() {
+                ui.add_space(22.0);
+            }
+            let r = ui.label(RichText::new(self.section.title()).strong().size(19.0));
+            if self.jump == Some(self.section) {
+                ui.scroll_to_rect(r.rect.expand(10.0), Some(Align::TOP));
+            }
+            self.tops.push((self.section, r.rect.top()));
+            ui.separator();
+        }
+        true
+    }
+}
+
 struct SettingsApp {
-    saved: Settings,
+    /// What the window shows and edits.
     s: Settings,
-    saved_words: Vec<String>,
+    /// What is on disk.
+    saved: Settings,
     words: Vec<String>,
-    saved_autostart: bool,
+    saved_words: Vec<String>,
     autostart: bool,
-    tab: Tab,
+    search: String,
+    /// Highlighted menu item.
+    active: Section,
+    /// Sections drawn in the last frame (others are hidden by the search).
+    visible: Vec<Section>,
+    jump: Option<(Section, Instant)>,
     new_exe: String,
     new_word: String,
-    word_filter: String,
     running: Vec<String>,
     test_text: String,
     status: Option<(String, bool, Instant)>,
-    keys: Vec<(String, u8)>,
+    /// Index into HOTKEYS of the hotkey being recorded.
+    recording: Option<usize>,
+    /// Keys that were already down when recording started (ignored until released).
+    rec_ignore: Vec<u8>,
+    rec_ping: Instant,
+    rec_error: bool,
+    confirm_reset: Option<Instant>,
+    window_focused: bool,
+    tray_running: bool,
+    tray_checked: Instant,
 }
 
 impl SettingsApp {
     fn new() -> Self {
         let (s, _) = sys::load_settings();
-        let mut words: Vec<String> = sys::load_exceptions().into_iter().collect();
-        words.sort();
-        let autostart = sys::startup_enabled();
+        let words = load_words();
         SettingsApp {
             saved: s.clone(),
             s,
             saved_words: words.clone(),
             words,
-            saved_autostart: autostart,
-            autostart,
-            tab: Tab::General,
+            autostart: sys::startup_enabled(),
+            search: String::new(),
+            active: Section::General,
+            visible: Section::ALL.to_vec(),
+            jump: None,
             new_exe: String::new(),
             new_word: String::new(),
-            word_filter: String::new(),
             running: sys::window_exes(),
             test_text: String::new(),
             status: None,
-            keys: key_choices(),
+            recording: None,
+            rec_ignore: Vec::new(),
+            rec_ping: Instant::now(),
+            rec_error: false,
+            confirm_reset: None,
+            window_focused: true,
+            tray_running: !sys::tray_window().is_null(),
+            tray_checked: Instant::now(),
         }
     }
 
     fn dirty(&self) -> bool {
-        self.s.to_text() != self.saved.to_text()
-            || self.words != self.saved_words
-            || self.autostart != self.saved_autostart
+        self.s.to_text() != self.saved.to_text() || self.words != self.saved_words
     }
 
+    /// Re-read the files (the tray menu or a text editor may have changed them).
+    fn reload_from_disk(&mut self) {
+        let (s, _) = sys::load_settings();
+        self.saved = s.clone();
+        self.s = s;
+        self.words = load_words();
+        self.saved_words = self.words.clone();
+        self.autostart = sys::startup_enabled();
+    }
+
+    fn conflict(&self) -> bool {
+        let h = [&self.s.hotkey_convert_word, &self.s.hotkey_convert_selection, &self.s.hotkey_toggle_auto];
+        (0..h.len()).any(|i| (i + 1..h.len()).any(|j| h[i].vk != 0 && h[i] == h[j]))
+    }
+
+    /// Write changed files and tell the tray app.
     fn save(&mut self) {
-        let r1 = sys::save_settings(&self.s);
-        let r2 = sys::save_exceptions(&self.words);
-        if self.autostart != sys::startup_enabled() {
-            sys::set_startup(self.autostart);
+        let mut result = Ok(());
+        if self.s.to_text() != self.saved.to_text() {
+            result = sys::save_settings(&self.s);
         }
-        match (r1, r2) {
-            (Ok(()), Ok(())) => {
+        if result.is_ok() && self.words != self.saved_words {
+            result = sys::save_exceptions(&self.words);
+        }
+        match result {
+            Ok(()) => {
                 self.saved = self.s.clone();
                 self.saved_words = self.words.clone();
-                self.saved_autostart = self.autostart;
-                let msg = if sys::notify_reload() {
-                    t("Saved and applied.")
-                } else {
-                    t("Saved. OpenSwitch is not running — start it for the settings to take effect.")
-                };
-                self.status = Some((msg.into(), true, Instant::now()));
+                self.tray_running = sys::notify_reload();
+                self.status = Some((t("Changes applied").into(), true, Instant::now()));
             }
-            (Err(e), _) | (_, Err(e)) => {
+            Err(e) => {
                 log::error!("saving settings failed: {e}");
+                // Keep the edits; retry on the next change.
+                self.saved = self.s.clone();
+                self.saved_words = self.words.clone();
                 self.status = Some((i18n::f("Could not save: {}", &[&e]), false, Instant::now()));
             }
         }
     }
 
-    fn conflicts(&self) -> Option<&'static str> {
-        let h = [&self.s.hotkey_convert_word, &self.s.hotkey_convert_selection, &self.s.hotkey_toggle_auto];
-        for i in 0..h.len() {
-            for j in i + 1..h.len() {
-                if h[i].vk != 0 && h[i] == h[j] {
-                    return Some(t("Two commands are assigned to the same key combination."));
-                }
-            }
-        }
-        None
+    // ---------------------------------------------------------------- hotkey recording
+
+    fn start_recording(&mut self, i: usize) {
+        self.recording = Some(i);
+        self.rec_ignore = (1..=254u8).filter(|&vk| key_down(vk)).collect();
+        self.rec_error = false;
+        self.rec_ping = Instant::now();
+        sys::suspend_hotkeys(true);
     }
 
-    // ---------------------------------------------------------------- tabs
+    fn stop_recording(&mut self) {
+        if self.recording.take().is_some() {
+            sys::suspend_hotkeys(false);
+        }
+    }
 
-    fn tab_general(&mut self, ui: &mut egui::Ui) {
-        section(ui, t("Interface language"));
-        egui::ComboBox::from_id_salt("language").selected_text(language_label(&self.s.language)).width(260.0).show_ui(
-            ui,
-            |ui| {
-                let system = format!("{} ({})", t("System"), i18n::system().native());
-                ui.selectable_value(&mut self.s.language, "system".to_string(), system);
-                for lang in Lang::ALL {
-                    ui.selectable_value(&mut self.s.language, lang.code().to_string(), lang.native());
-                }
-            },
-        );
+    /// Poll the keyboard while recording. The tray app lets keys through meanwhile, so Pause
+    /// and other hotkeys reach this window; the state is read straight from Windows because
+    /// egui does not know keys like Pause or ScrollLock.
+    fn poll_recording(&mut self, ctx: &egui::Context) {
+        let Some(i) = self.recording else { return };
+        ctx.request_repaint_after(Duration::from_millis(15));
+        // A focused button would react to Space/Enter: keep focus away while recording.
+        ctx.memory_mut(|m| {
+            if let Some(id) = m.focused() {
+                m.surrender_focus(id);
+            }
+        });
+        if self.rec_ping.elapsed() > Duration::from_secs(1) {
+            self.rec_ping = Instant::now();
+            sys::suspend_hotkeys(true);
+        }
+        self.rec_ignore.retain(|&vk| key_down(vk));
+        if key_down(0x1B) {
+            self.stop_recording(); // Esc
+            return;
+        }
+        let pressed =
+            (1..=254u8).find(|&vk| !is_mouse_or_modifier(vk) && !self.rec_ignore.contains(&vk) && key_down(vk));
+        let Some(mut vk) = pressed else { return };
+        if vk == VK_CANCEL {
+            vk = VK_PAUSE; // Ctrl+Pause arrives as Ctrl+Break
+        }
+        if vk == 0x08 || vk == 0x2E {
+            *hotkey_mut(&mut self.s, i) = Hotkey::NONE; // Backspace / Delete: no hotkey
+            self.stop_recording();
+            return;
+        }
+        if !is_hotkey_key(vk) {
+            self.rec_error = true;
+            self.rec_ignore.push(vk);
+            return;
+        }
+        *hotkey_mut(&mut self.s, i) = Hotkey {
+            ctrl: key_down(0x11),
+            alt: key_down(0x12),
+            shift: key_down(0x10),
+            win: key_down(0x5B) || key_down(0x5C),
+            vk,
+        };
+        self.stop_recording();
+    }
 
-        section(ui, t("Automatic switching"));
-        ui.checkbox(&mut self.s.auto_switch, t("Fix words typed in the wrong layout and switch the layout"));
-        ui.add_enabled_ui(self.s.auto_switch, |ui| {
-            ui.indent("auto", |ui| {
-                ui.checkbox(&mut self.s.switch_on_enter, t("Check the word on Enter too (not only on Space)"));
-                ui.checkbox(&mut self.s.single_letters, t("Fix one-letter words (d — в, z — я, ш — i)"));
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.label(t("Sensitivity:"));
-                    ui.label(RichText::new(t("cautious")).weak());
-                    ui.add(egui::Slider::new(&mut self.s.sensitivity, 0.5..=2.0).step_by(0.05).show_value(false));
-                    ui.label(RichText::new(t("bold")).weak());
-                    if (self.s.sensitivity - 1.0).abs() > 0.01 && ui.small_button(t("default")).clicked() {
-                        self.s.sensitivity = 1.0;
+    // ---------------------------------------------------------------- sections
+
+    fn general(&mut self, ui: &mut egui::Ui, p: &mut Page) {
+        p.begin(Section::General);
+        let label = t("Interface language");
+        if p.row(ui, &[label, "language"]) {
+            setting_row(ui, label, None, |ui| {
+                egui::ComboBox::from_id_salt("language")
+                    .selected_text(language_label(&self.s.language))
+                    .width(200.0)
+                    .show_ui(ui, |ui| {
+                        let system = format!("{} ({})", t("System"), i18n::system().native());
+                        ui.selectable_value(&mut self.s.language, "system".to_string(), system);
+                        for lang in Lang::ALL {
+                            ui.selectable_value(&mut self.s.language, lang.code().to_string(), lang.native());
+                        }
+                    });
+            });
+        }
+
+        let (label, hint) =
+            (t("Fix the layout automatically"), t("A word typed in the wrong layout is fixed after Space"));
+        if p.row(ui, &[label, hint]) {
+            setting_row(ui, label, Some(hint), |ui| toggle(ui, &mut self.s.auto_switch));
+        }
+
+        let (label, hint) = (t("How boldly to fix"), t("Cautious: fewer mistakes, bold: fixes more words"));
+        if p.row(ui, &[label, hint, t("Sensitivity")]) {
+            setting_row(ui, label, Some(hint), |ui| {
+                ui.add_enabled_ui(self.s.auto_switch, |ui| {
+                    // right-to-left layout: last preset first
+                    for (value, key) in SENSITIVITY_PRESETS.iter().rev() {
+                        let on = (self.s.sensitivity - value).abs() < 0.01;
+                        if ui.selectable_label(on, t(key)).clicked() {
+                            self.s.sensitivity = *value;
+                        }
                     }
                 });
             });
-        });
-
-        section(ui, t("Manual correction"));
-        ui.checkbox(
-            &mut self.s.double_shift,
-            t("Double-press Shift fixes the last word (handy on laptops without Pause)"),
-        );
-
-        section(ui, t("System"));
-        ui.checkbox(&mut self.autostart, t("Start OpenSwitch with Windows"));
-
-        section(ui, t("Test"));
-        ui.label(
-            RichText::new(t(
-                "Type something in the wrong layout here, e.g. «ghbdtn» and a space. Works while OpenSwitch is running (tray icon).",
-            ))
-            .weak(),
-        );
-        ui.add(egui::TextEdit::multiline(&mut self.test_text).desired_rows(3).desired_width(f32::INFINITY));
-    }
-
-    fn tab_hotkeys(&mut self, ui: &mut egui::Ui) {
-        section(ui, t("Hotkeys"));
-        egui::Grid::new("hk").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
-            let keys = &self.keys;
-            ui.label(t("Fix the last word\n(press again to undo)"));
-            hotkey_editor(ui, "hk_word", &mut self.s.hotkey_convert_word, keys);
-            ui.end_row();
-            ui.label(t("Fix selected text"));
-            hotkey_editor(ui, "hk_sel", &mut self.s.hotkey_convert_selection, keys);
-            ui.end_row();
-            ui.label(t("Enable/disable auto switching"));
-            hotkey_editor(ui, "hk_auto", &mut self.s.hotkey_toggle_auto, keys);
-            ui.end_row();
-        });
-        if let Some(c) = self.conflicts() {
-            ui.add_space(6.0);
-            ui.colored_label(Color32::from_rgb(0xD0, 0x50, 0x30), c);
         }
-        ui.add_space(10.0);
-        ui.label(
-            RichText::new(t(
-                "If you cancelled an auto fix with the hotkey, the word is remembered and never fixed again (see the «Words» tab).\nCtrl+Pause works too (Windows calls it Break).",
-            ))
-            .weak(),
-        );
-        if ui.button(t("Restore default keys")).clicked() {
-            let d = Settings::default();
-            self.s.hotkey_convert_word = d.hotkey_convert_word;
-            self.s.hotkey_convert_selection = d.hotkey_convert_selection;
-            self.s.hotkey_toggle_auto = d.hotkey_toggle_auto;
-        }
-    }
 
-    fn tab_programs(&mut self, ui: &mut egui::Ui) {
-        section(ui, t("Programs without auto switching"));
-        ui.label(
-            RichText::new(t(
-                "Words are not fixed automatically in these programs, but hotkeys work. Handy for terminals, code editors and games.",
-            ))
-            .weak(),
-        );
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            let r = ui
-                .add(egui::TextEdit::singleline(&mut self.new_exe).hint_text(t("e.g. code.exe")).desired_width(180.0));
-            let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if ui.button(t("Add")).clicked() || enter {
-                add_exe(&mut self.s, &self.new_exe);
-                self.new_exe.clear();
+        let label = t("Start OpenSwitch with Windows");
+        if p.row(ui, &[label, "autostart"]) {
+            setting_row(ui, label, None, |ui| {
+                if toggle(ui, &mut self.autostart).changed() {
+                    sys::set_startup(self.autostart);
+                }
+            });
+        }
+
+        // Fine tuning: folded away normally, shown flat while searching.
+        let fine = |this: &mut Self, ui: &mut egui::Ui, p: &mut Page| {
+            let label = t("Check the word on Enter too (not only on Space)");
+            if p.row(ui, &[label]) {
+                setting_row(ui, label, None, |ui| toggle(ui, &mut this.s.switch_on_enter));
             }
+            let label = t("Fix one-letter words (d — в, z — я, ш — i)");
+            if p.row(ui, &[label]) {
+                setting_row(ui, label, None, |ui| toggle(ui, &mut this.s.single_letters));
+            }
+            let label = t("Exact sensitivity");
+            if p.row(ui, &[label, t("Sensitivity")]) {
+                setting_row(ui, label, None, |ui| {
+                    if (this.s.sensitivity - 1.0).abs() > 0.01 && ui.small_button(t("default")).clicked() {
+                        this.s.sensitivity = 1.0;
+                    }
+                    ui.add(egui::Slider::new(&mut this.s.sensitivity, 0.5..=2.0).step_by(0.05).fixed_decimals(2));
+                });
+            }
+        };
+        if p.filtering() {
+            fine(self, ui, p);
+        } else {
+            ui.add_space(4.0);
+            egui::CollapsingHeader::new(RichText::new(t("Fine tuning")).weak()).id_salt("fine").show(ui, |ui| {
+                fine(self, ui, p);
+            });
+        }
+
+        let (label, hint) = (t("Try it here"), t("Type «ghbdtn» and a space, it should become «привет»"));
+        if p.row(ui, &[label, hint]) {
+            ui.add_space(6.0);
+            ui.label(label);
+            ui.label(RichText::new(hint).small().weak());
+            ui.add(egui::TextEdit::multiline(&mut self.test_text).desired_rows(2).desired_width(f32::INFINITY));
+        }
+    }
+
+    fn hotkeys(&mut self, ui: &mut egui::Ui, p: &mut Page) {
+        p.begin(Section::Hotkeys);
+        for (i, key) in HOTKEYS.iter().enumerate() {
+            let label = t(key);
+            let current = hotkey_mut(&mut self.s, i).to_string();
+            if !p.row(ui, &[label, &current]) {
+                continue;
+            }
+            let hint = (i == 0).then(|| t("Press again to undo"));
+            let mut start = false;
+            let mut clear = false;
+            setting_row(ui, label, hint, |ui| {
+                if self.recording == Some(i) {
+                    let text =
+                        if self.rec_error { t("This key can't be used, try another") } else { t("Press keys…") };
+                    let b = egui::Button::new(RichText::new(text).color(ui.visuals().selection.stroke.color))
+                        .selected(true)
+                        .min_size(egui::vec2(170.0, 0.0));
+                    ui.add(b).on_hover_text(t("Esc: cancel, Backspace: no hotkey"));
+                } else {
+                    let hk = *hotkey_mut(&mut self.s, i);
+                    if hk.vk != 0 && ui.small_button("×").on_hover_text(t("No hotkey")).clicked() {
+                        clear = true;
+                    }
+                    let text = if hk.vk == 0 { t("None").to_string() } else { hk.to_string() };
+                    let b = egui::Button::new(RichText::new(text).monospace()).min_size(egui::vec2(170.0, 0.0));
+                    start = ui.add(b).on_hover_text(t("Click and press the key combination")).clicked();
+                }
+            });
+            if clear {
+                *hotkey_mut(&mut self.s, i) = Hotkey::NONE;
+            }
+            if start {
+                self.stop_recording();
+                self.start_recording(i);
+            }
+        }
+        if self.conflict() && p.header_drawn {
+            ui.colored_label(RED, t("Two commands are assigned to the same key combination."));
+        }
+
+        let (label, hint) = (t("Double Shift fixes the last word"), t("Handy on laptops without the Pause key"));
+        if p.row(ui, &[label, hint]) {
+            setting_row(ui, label, Some(hint), |ui| toggle(ui, &mut self.s.double_shift));
+        }
+
+        let label = t("Restore default keys");
+        if p.row(ui, &[label]) {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui.button(label).clicked() {
+                    let d = Settings::default();
+                    self.s.hotkey_convert_word = d.hotkey_convert_word;
+                    self.s.hotkey_convert_selection = d.hotkey_convert_selection;
+                    self.s.hotkey_toggle_auto = d.hotkey_toggle_auto;
+                    self.s.double_shift = d.double_shift;
+                }
+                ui.label(RichText::new(t("Ctrl+Pause works too (Windows calls it Break).")).small().weak());
+            });
+        }
+    }
+
+    fn programs(&mut self, ui: &mut egui::Ui, p: &mut Page) {
+        p.begin(Section::Programs);
+        let mut list: Vec<String> = self.s.exclude.iter().cloned().collect();
+        list.sort();
+        let label = t("Programs without auto switching");
+        let hint =
+            t("Words are not fixed automatically in these programs, but hotkeys work. Handy for terminals, code editors and games.");
+        let mut texts: Vec<&str> = vec![label, hint];
+        texts.extend(list.iter().map(|s| s.as_str()));
+        if !p.row(ui, &texts) {
+            return;
+        }
+        ui.label(label);
+        ui.label(RichText::new(hint).small().weak());
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
             let mut picked: Option<String> = None;
-            egui::ComboBox::from_id_salt("running").selected_text(t("Choose from open windows…")).width(220.0).show_ui(
+            egui::ComboBox::from_id_salt("running").selected_text(t("Choose from open windows…")).width(230.0).show_ui(
                 ui,
                 |ui| {
                     for e in &self.running {
@@ -218,42 +451,43 @@ impl SettingsApp {
                     }
                 },
             );
-            if let Some(p) = picked {
-                add_exe(&mut self.s, &p);
-            }
-            if ui.small_button(t("Refresh")).on_hover_text(t("Update window list")).clicked() {
+            if ui.small_button("⟳").on_hover_text(t("Update window list")).clicked() {
                 self.running = sys::window_exes();
             }
+            if let Some(name) = picked {
+                add_exe(&mut self.s, &name);
+            }
+            ui.label(RichText::new(t("or")).weak());
+            let r = ui
+                .add(egui::TextEdit::singleline(&mut self.new_exe).hint_text(t("e.g. code.exe")).desired_width(130.0));
+            let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if ui.button(t("Add")).clicked() || enter {
+                add_exe(&mut self.s, &self.new_exe);
+                self.new_exe.clear();
+            }
         });
-        ui.add_space(6.0);
-        let mut list: Vec<String> = self.s.exclude.iter().cloned().collect();
-        list.sort();
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            egui::ScrollArea::vertical().max_height(260.0).auto_shrink([false, true]).show(ui, |ui| {
-                if list.is_empty() {
-                    ui.label(RichText::new(t("List is empty")).weak());
-                }
-                for e in list {
-                    ui.horizontal(|ui| {
-                        if ui.small_button("×").on_hover_text(t("Remove")).clicked() {
-                            self.s.exclude.remove(&e);
-                        }
-                        ui.label(&e);
-                    });
-                }
-            });
-        });
+        ui.add_space(4.0);
+        let shown: Vec<&String> =
+            list.iter().filter(|e| p.all || !p.filtering() || p.hit(e) || p.hit(label) || p.hit(hint)).collect();
+        if let Some(remove) = removable_list(ui, &shown, t("List is empty")) {
+            self.s.exclude.remove(&remove);
+        }
     }
 
-    fn tab_words(&mut self, ui: &mut egui::Ui) {
-        section(ui, t("Exception words"));
-        ui.label(
-            RichText::new(t(
-                "These words are never fixed automatically. Write them the way you type them (e.g. «ctx» or «git»).",
-            ))
-            .weak(),
-        );
+    fn words(&mut self, ui: &mut egui::Ui, p: &mut Page) {
+        p.begin(Section::Words);
+        let label = t("Exception words");
+        let hint =
+            t("These words are never fixed automatically. Write them the way you type them (e.g. «ctx» or «git»).");
+        let hint2 = t("A word is added here by itself when you undo its automatic fix.");
+        let mut texts: Vec<&str> = vec![label, hint, hint2];
+        texts.extend(self.words.iter().map(|s| s.as_str()));
+        if !p.row(ui, &texts) {
+            return;
+        }
+        ui.label(label);
+        ui.label(RichText::new(hint).small().weak());
+        ui.label(RichText::new(hint2).small().weak());
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             let r =
@@ -267,52 +501,293 @@ impl SettingsApp {
                 }
                 self.new_word.clear();
             }
-            ui.add_space(12.0);
-            ui.label(t("Search:"));
-            ui.add(egui::TextEdit::singleline(&mut self.word_filter).desired_width(140.0));
         });
-        ui.add_space(6.0);
-        let filter = self.word_filter.to_lowercase();
-        let mut remove = None;
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            egui::ScrollArea::vertical().max_height(260.0).auto_shrink([false, true]).show(ui, |ui| {
-                if self.words.is_empty() {
-                    ui.label(RichText::new(t("No words yet")).weak());
-                }
-                for (i, wd) in self.words.iter().enumerate() {
-                    if !filter.is_empty() && !wd.contains(&filter) {
-                        continue;
-                    }
-                    ui.horizontal(|ui| {
-                        if ui.small_button("×").on_hover_text(t("Remove")).clicked() {
-                            remove = Some(i);
-                        }
-                        ui.label(wd);
-                    });
-                }
-            });
-        });
-        if let Some(i) = remove {
-            self.words.remove(i);
+        ui.add_space(4.0);
+        let general = p.all || !p.filtering() || p.hit(label) || p.hit(hint) || p.hit(hint2);
+        let shown: Vec<&String> = self.words.iter().filter(|w| general || p.hit(w)).collect();
+        if let Some(remove) = removable_list(ui, &shown, t("No words yet")) {
+            self.words.retain(|w| *w != remove);
         }
     }
 
-    fn tab_about(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(8.0);
-        ui.heading(format!("OpenSwitch {}", env!("CARGO_PKG_VERSION")));
-        ui.label(t("Free automatic keyboard layout switcher for Windows."));
-        ui.add_space(8.0);
-        ui.label(t("• Works offline, sends nothing anywhere."));
-        ui.label(t("• Dictionaries: the wordfreq project (CC BY-SA 4.0)."));
-        ui.label(t("• License: GNU GPL v3.0 or later."));
-        ui.add_space(8.0);
-        ui.hyperlink_to(t("Source code on GitHub"), "https://github.com/DezFix/OpenSwitch");
-        ui.add_space(8.0);
-        if ui.button(t("Open settings folder")).clicked() {
-            sys::open_path(&sys::data_dir());
+    fn about(&mut self, ui: &mut egui::Ui, p: &mut Page) {
+        p.begin(Section::About);
+        let version = format!("OpenSwitch {}", env!("CARGO_PKG_VERSION"));
+        let what = t("Free automatic keyboard layout switcher for Windows.");
+        if p.row(ui, &[&version, what, t("License: GNU GPL v3.0 or later."), "github"]) {
+            ui.label(RichText::new(&version).strong());
+            ui.label(what);
+            ui.label(RichText::new(t("• Works offline, sends nothing anywhere.")).weak());
+            ui.label(RichText::new(t("• Dictionaries: the wordfreq project (CC BY-SA 4.0).")).weak());
+            ui.label(RichText::new(t("License: GNU GPL v3.0 or later.")).weak());
+            ui.hyperlink_to(t("Source code on GitHub"), "https://github.com/DezFix/OpenSwitch");
+        }
+
+        let (label, hint) = (t("Program files"), t("Settings, exception words and the log for bug reports"));
+        if p.row(ui, &[label, hint, "log", "settings.ini"]) {
+            setting_row(ui, label, Some(hint), |ui| {
+                if ui.button(t("Log")).clicked() {
+                    sys::open_path(&logging::log_dir());
+                }
+                if ui.button(t("Settings")).clicked() {
+                    sys::open_path(&sys::data_dir());
+                }
+            });
+        }
+
+        let (label, hint) = (t("Reset settings"), t("Exception words are kept"));
+        if p.row(ui, &[label, hint]) {
+            setting_row(ui, label, Some(hint), |ui| {
+                let armed = self.confirm_reset.is_some_and(|at| at.elapsed() < Duration::from_secs(4));
+                let text = if armed { t("Click again to reset") } else { t("Reset") };
+                let b = egui::Button::new(if armed { RichText::new(text).color(RED) } else { RichText::new(text) });
+                if ui.add(b).clicked() {
+                    if armed {
+                        self.s = Settings::default();
+                        self.confirm_reset = None;
+                    } else {
+                        self.confirm_reset = Some(Instant::now());
+                        ui.ctx().request_repaint_after(Duration::from_secs(4));
+                    }
+                }
+            });
         }
     }
+
+    // ---------------------------------------------------------------- frame
+
+    fn sidebar(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(10.0);
+        let search = egui::TextEdit::singleline(&mut self.search)
+            .hint_text(format!("🔍 {}", t("Search")))
+            .desired_width(f32::INFINITY);
+        let r = ui.add(search);
+        if r.changed() {
+            self.jump = None;
+        }
+        if r.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.search.clear();
+        }
+        ui.add_space(10.0);
+        for sec in Section::ALL {
+            let shown = self.visible.contains(&sec);
+            let text = RichText::new(sec.title()).size(15.0);
+            let item = egui::Button::selectable(self.active == sec && shown, text)
+                .min_size(egui::vec2(ui.available_width(), 30.0));
+            let r = ui.add_enabled(shown, item);
+            if r.clicked() {
+                self.active = sec;
+                self.jump = Some((sec, Instant::now()));
+            }
+        }
+        if self.visible.is_empty() {
+            ui.add_space(6.0);
+            ui.label(RichText::new(t("Nothing found")).weak());
+        }
+
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+            ui.add_space(10.0);
+            if let Some((msg, ok, at)) = &self.status {
+                let ttl = if *ok { 3 } else { 10 };
+                if at.elapsed() < Duration::from_secs(ttl) {
+                    ui.add(egui::Label::new(RichText::new(msg).small().color(if *ok { GREEN } else { RED })).wrap());
+                    ui.ctx().request_repaint_after(Duration::from_millis(500));
+                }
+            }
+        });
+    }
+
+    fn page(&mut self, ui: &mut egui::Ui) {
+        if !self.tray_running {
+            egui::Frame::new()
+                .fill(ui.visuals().warn_fg_color.gamma_multiply(0.12))
+                .inner_margin(10.0)
+                .corner_radius(6.0)
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(t("OpenSwitch is not running, so these settings don't work yet."));
+                        if ui.button(t("Run OpenSwitch")).clicked() {
+                            sys::spawn_self(&[]);
+                            self.tray_checked = Instant::now() - Duration::from_secs(5);
+                        }
+                    });
+                });
+            ui.add_space(6.0);
+        }
+
+        let jump = self.jump.filter(|(_, at)| at.elapsed() < Duration::from_millis(JUMP_MS));
+        let mut p = Page {
+            query: self.search.trim().to_lowercase(),
+            section: Section::General,
+            all: false,
+            header_drawn: false,
+            tops: Vec::new(),
+            // Scroll only in the frame after the click.
+            jump: jump.filter(|(_, at)| at.elapsed() < Duration::from_millis(50)).map(|(s, _)| s),
+        };
+        let out = egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            ui.set_max_width(ui.available_width() - 12.0);
+            self.general(ui, &mut p);
+            self.hotkeys(ui, &mut p);
+            self.programs(ui, &mut p);
+            self.words(ui, &mut p);
+            self.about(ui, &mut p);
+            // Room at the end so the last section can scroll up to the top too.
+            if let Some((_, top)) = p.tops.last() {
+                let last = ui.min_rect().bottom() - top;
+                ui.add_space((ui.clip_rect().height() - last - 20.0).max(0.0));
+            }
+        });
+        if jump.is_some() {
+            ui.ctx().request_repaint();
+        }
+
+        self.visible = p.tops.iter().map(|(s, _)| *s).collect();
+        // The menu follows the scroll position: the last section whose header is in the upper
+        // third of the view (or above it) is the current one.
+        let top = out.inner_rect.top() + out.inner_rect.height() / 3.0;
+        let current = p.tops.iter().take_while(|(_, y)| *y <= top).last().or(p.tops.first()).map(|(s, _)| *s);
+        match (jump, current) {
+            (Some((s, _)), _) => self.active = s,
+            (None, Some(s)) => self.active = s,
+            _ => {}
+        }
+    }
+}
+
+impl eframe::App for SettingsApp {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        let lang = i18n::resolve(&self.s.language);
+        if lang != i18n::current() {
+            i18n::set(lang);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(t("OpenSwitch — Settings").into()));
+        }
+
+        // Back in the window: pick up changes made meanwhile (tray menu, hand edits).
+        let focused = ctx.input(|i| i.focused);
+        if focused && !self.window_focused {
+            if !self.dirty() {
+                self.reload_from_disk();
+            }
+            self.running = sys::window_exes();
+        }
+        if !focused && self.window_focused {
+            self.stop_recording();
+        }
+        self.window_focused = focused;
+        if self.tray_checked.elapsed() > Duration::from_secs(2) {
+            self.tray_checked = Instant::now();
+            self.tray_running = !sys::tray_window().is_null();
+        }
+        ctx.request_repaint_after(Duration::from_secs(2));
+
+        self.poll_recording(&ctx);
+
+        egui::Panel::left("nav").exact_size(SIDEBAR_WIDTH).resizable(false).show(ui, |ui| self.sidebar(ui));
+        egui::CentralPanel::default().show(ui, |ui| self.page(ui));
+
+        // Apply changes right away, but not in the middle of dragging a slider.
+        let busy = ctx.input(|i| i.pointer.any_down()) || self.recording.is_some();
+        if !busy && self.dirty() {
+            if self.conflict() {
+                if self.status.as_ref().is_none_or(|(_, ok, _)| *ok) {
+                    self.status =
+                        Some((t("Not saved: two commands have the same keys.").into(), false, Instant::now()));
+                }
+            } else {
+                self.save();
+            }
+        }
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.stop_recording();
+    }
+}
+
+// ---------------------------------------------------------------- widgets
+
+/// A row: label (and a small hint under it) on the left, the control on the right.
+fn setting_row<R>(ui: &mut egui::Ui, label: &str, hint: Option<&str>, control: impl FnOnce(&mut egui::Ui) -> R) {
+    ui.add_space(4.0);
+    let height = if hint.is_some() { 38.0 } else { 26.0 };
+    egui::Sides::new().height(height).shrink_left().wrap().show(
+        ui,
+        |ui| {
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 1.0;
+                ui.label(label);
+                if let Some(h) = hint {
+                    ui.label(RichText::new(h).small().weak());
+                }
+            });
+        },
+        control,
+    );
+    ui.add_space(4.0);
+    let y = ui.cursor().top();
+    let x = ui.max_rect().x_range();
+    ui.painter().hline(x, y, ui.visuals().widgets.noninteractive.bg_stroke);
+}
+
+/// On/off switch.
+fn toggle(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
+    let (rect, mut r) = ui.allocate_exact_size(egui::vec2(38.0, 21.0), Sense::click());
+    if r.clicked() {
+        *on = !*on;
+        r.mark_changed();
+    }
+    r.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, ui.is_enabled(), *on, ""));
+    if ui.is_rect_visible(rect) {
+        let how_on = ui.ctx().animate_bool_responsive(r.id, *on);
+        let v = ui.style().interact_selectable(&r, *on);
+        let radius = rect.height() / 2.0;
+        let fill = if *on { ui.visuals().selection.bg_fill } else { ui.visuals().widgets.inactive.bg_fill };
+        ui.painter().rect(rect, radius, fill, v.bg_stroke, egui::StrokeKind::Inside);
+        let x = egui::lerp((rect.left() + radius)..=(rect.right() - radius), how_on);
+        let knob = if *on { Color32::WHITE } else { v.fg_stroke.color };
+        ui.painter().circle_filled(egui::pos2(x, rect.center().y), radius - 3.5, knob);
+    }
+    r
+}
+
+/// Items as compact chips with a remove cross, wrapped over lines (no inner scrolling: the
+/// page itself scrolls). Returns the item to remove.
+fn removable_list(ui: &mut egui::Ui, items: &[&String], empty: &str) -> Option<String> {
+    let mut remove = None;
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        if items.is_empty() {
+            ui.label(RichText::new(empty).weak());
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+            for item in items {
+                let text = format!("{item}  ×");
+                let chip = egui::Button::new(text).corner_radius(10.0);
+                if ui.add(chip).on_hover_text(t("Remove")).clicked() {
+                    remove = Some((*item).clone());
+                }
+            }
+        });
+    });
+    remove
+}
+
+fn load_words() -> Vec<String> {
+    let mut words: Vec<String> = sys::load_exceptions().into_iter().collect();
+    words.sort();
+    words
+}
+
+fn key_down(vk: u8) -> bool {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+    unsafe { (GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0 }
+}
+
+fn is_mouse_or_modifier(vk: u8) -> bool {
+    matches!(vk, 0x01 | 0x02 | 0x04..=0x06 | 0x10..=0x12 | 0x5B | 0x5C | 0xA0..=0xA5)
 }
 
 fn language_label(setting: &str) -> String {
@@ -335,97 +810,6 @@ fn add_exe(s: &mut Settings, name: &str) {
     s.exclude.insert(n);
 }
 
-fn section(ui: &mut egui::Ui, title: &str) {
-    ui.add_space(10.0);
-    ui.label(RichText::new(title).strong().size(16.0));
-    ui.add_space(2.0);
-}
-
-fn hotkey_editor(ui: &mut egui::Ui, id: &str, hk: &mut Hotkey, keys: &[(String, u8)]) {
-    ui.horizontal(|ui| {
-        let on = hk.vk != 0;
-        ui.add_enabled_ui(on, |ui| {
-            ui.checkbox(&mut hk.ctrl, "Ctrl");
-            ui.checkbox(&mut hk.alt, "Alt");
-            ui.checkbox(&mut hk.shift, "Shift");
-            ui.checkbox(&mut hk.win, "Win");
-        });
-        let current = keys.iter().find(|(_, v)| *v == hk.vk).map(|(n, _)| n.clone()).unwrap_or_else(|| hk.to_string());
-        egui::ComboBox::from_id_salt(id).selected_text(current).width(110.0).height(300.0).show_ui(ui, |ui| {
-            for (name, vk) in keys {
-                ui.selectable_value(&mut hk.vk, *vk, name);
-            }
-        });
-        if hk.vk == 0 {
-            *hk = Hotkey::NONE;
-        }
-    });
-}
-
-impl eframe::App for SettingsApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let lang = i18n::resolve(&self.s.language);
-        if lang != i18n::current() {
-            i18n::set(lang);
-            self.keys = key_choices();
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Title(t("OpenSwitch — Settings").into()));
-        }
-        egui::Panel::top("tabs").show(ui, |ui| {
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                for (tab, name) in [
-                    (Tab::General, t("General")),
-                    (Tab::Hotkeys, t("Hotkeys")),
-                    (Tab::Programs, t("Programs")),
-                    (Tab::Words, t("Words")),
-                    (Tab::About, t("About")),
-                ] {
-                    ui.selectable_value(&mut self.tab, tab, RichText::new(name).size(15.0));
-                }
-            });
-            ui.add_space(4.0);
-        });
-        egui::Panel::bottom("buttons").show(ui, |ui| {
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                let dirty = self.dirty();
-                let can_save = dirty && self.conflicts().is_none();
-                if ui.add_enabled(can_save, egui::Button::new(RichText::new(t("Save")).size(15.0))).clicked() {
-                    self.save();
-                }
-                if ui.add_enabled(dirty, egui::Button::new(t("Revert changes"))).clicked() {
-                    self.s = self.saved.clone();
-                    self.words = self.saved_words.clone();
-                    self.autostart = self.saved_autostart;
-                }
-                if sys::tray_window().is_null() && ui.button(t("Run OpenSwitch")).clicked() {
-                    sys::spawn_self(&[]);
-                }
-                if let Some((msg, ok, at)) = &self.status {
-                    if at.elapsed() < Duration::from_secs(6) {
-                        let c =
-                            if *ok { Color32::from_rgb(0x2E, 0x9E, 0x4F) } else { Color32::from_rgb(0xD0, 0x50, 0x30) };
-                        ui.colored_label(c, msg);
-                        ui.ctx().request_repaint_after(Duration::from_millis(500));
-                    }
-                } else if dirty {
-                    ui.label(RichText::new(t("unsaved changes")).weak());
-                }
-            });
-            ui.add_space(8.0);
-        });
-        egui::CentralPanel::default().show(ui, |ui| {
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match self.tab {
-                Tab::General => self.tab_general(ui),
-                Tab::Hotkeys => self.tab_hotkeys(ui),
-                Tab::Programs => self.tab_programs(ui),
-                Tab::Words => self.tab_words(ui),
-                Tab::About => self.tab_about(ui),
-            });
-        });
-    }
-}
-
 /// Window icon: the application icon (assets/openswitch.svg) rendered at 64x64, raw RGBA.
 fn app_icon() -> egui::IconData {
     const RGBA: &[u8] = include_bytes!("../assets/icon-64.rgba");
@@ -441,12 +825,14 @@ fn setup_fonts(ctx: &egui::Context) {
             f.insert(0, "segoe".into());
         }
     }
-    // Symbols fallback (arrows, crosses) after the main font.
-    if let Ok(bytes) = std::fs::read(format!("{windir}\\Fonts\\seguisym.ttf")) {
-        fonts.font_data.insert("segoe_sym".into(), Arc::new(egui::FontData::from_owned(bytes)));
-        if let Some(f) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-            let pos = if f.first().map(|s| s == "segoe").unwrap_or(false) { 1 } else { 0 };
-            f.insert(pos, "segoe_sym".into());
+    // Symbols fallback (arrows, crosses, the search glass) after the main font.
+    for file in ["seguisym.ttf", "seguiemj.ttf"] {
+        if let Ok(bytes) = std::fs::read(format!("{windir}\\Fonts\\{file}")) {
+            fonts.font_data.insert(file.into(), Arc::new(egui::FontData::from_owned(bytes)));
+            if let Some(f) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+                let pos = f.iter().position(|s| s == "segoe").map_or(0, |i| i + 1);
+                f.insert(pos, file.into());
+            }
         }
     }
     ctx.set_fonts(fonts);
@@ -454,6 +840,7 @@ fn setup_fonts(ctx: &egui::Context) {
         use egui::{FontId, TextStyle};
         s.text_styles.insert(TextStyle::Body, FontId::proportional(14.5));
         s.text_styles.insert(TextStyle::Button, FontId::proportional(14.5));
+        s.text_styles.insert(TextStyle::Small, FontId::proportional(12.5));
         s.text_styles.insert(TextStyle::Heading, FontId::proportional(22.0));
         s.spacing.item_spacing = egui::vec2(8.0, 6.0);
     });
@@ -481,8 +868,8 @@ pub fn run() {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(title)
-            .with_inner_size([640.0, 560.0])
-            .with_min_inner_size([520.0, 420.0])
+            .with_inner_size([780.0, 580.0])
+            .with_min_inner_size([620.0, 420.0])
             .with_icon(app_icon()),
         ..Default::default()
     };

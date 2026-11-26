@@ -21,7 +21,7 @@ use openswitch::i18n::{self, t};
 use openswitch::layout::{guess_text_lang, Lang, Layouts};
 
 use crate::clipboard;
-use crate::sys::{self, w, APP_NAME, OUR_MARK, WINDOW_CLASS, WM_RELOAD};
+use crate::sys::{self, w, APP_NAME, OUR_MARK, WINDOW_CLASS, WM_RELOAD, WM_SUSPEND};
 
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
@@ -41,6 +41,11 @@ const WM_LAYOUT_SEEN: u32 = WM_APP + 6;
 const TIMER_ICON: usize = 1;
 const TIMER_REHOOK: usize = 2;
 const TIMER_VERIFY: usize = 3;
+const TIMER_WATCH: usize = 4;
+/// How often the settings files are checked for edits made outside the settings window.
+const WATCH_MS: u32 = 2000;
+/// How long one WM_SUSPEND request lasts (the settings window repeats it while recording).
+const SUSPEND_MS: u64 = 3000;
 const VERIFY_MS: u32 = 300;
 /// A hook call slower than this is logged (Windows' own limit is around 300-1000 ms).
 const SLOW_HOOK_MS: u128 = 30;
@@ -48,8 +53,6 @@ const SLOW_HOOK_MS: u128 = 30;
 const ID_AUTO: usize = 100;
 const ID_STARTUP: usize = 101;
 const ID_SETTINGS: usize = 102;
-const ID_RELOAD: usize = 104;
-const ID_FOLDER: usize = 105;
 const ID_ABOUT: usize = 106;
 const ID_EXIT: usize = 107;
 
@@ -83,6 +86,10 @@ struct App {
     slow_apps: HashSet<String>,
     /// Programs whose layout cannot be read back: never press the shortcut there.
     unreliable_apps: HashSet<String>,
+    /// Keys are passed through untouched until this tick (the settings window records a hotkey).
+    suspended_until: u64,
+    /// Modification times of settings.ini / exceptions.txt when they were last read.
+    files_stamp: [Option<std::time::SystemTime>; 2],
 }
 
 thread_local! {
@@ -399,6 +406,11 @@ fn is_modifier(vk: u8) -> bool {
 /// Returns true if the key must be swallowed. Runs inside the keyboard hook: keep it fast.
 fn handle_key(vk: u8, down: bool) -> bool {
     let result = with_app(|app| {
+        let now = unsafe { GetTickCount64() };
+        if now < app.suspended_until {
+            app.engine.reset();
+            return None;
+        }
         let fg = unsafe { GetForegroundWindow() };
         if fg != app.last_fg {
             // The WinEvent has not arrived yet. Do not look the program up here (slow);
@@ -430,11 +442,10 @@ fn handle_key(vk: u8, down: bool) -> bool {
                 [is_down(VK_LWIN), is_down(VK_RWIN)],
             );
         }
-        let now = unsafe { GetTickCount64() };
         let auto_allowed = app.fg_known && !app.fg_excluded;
-        (app.engine.on_key(vk, down, now, layout, auto_allowed), app.hwnd)
+        Some((app.engine.on_key(vk, down, now, layout, auto_allowed), app.hwnd))
     });
-    let Some((out, hwnd)) = result else { return false };
+    let Some(Some((out, hwnd))) = result else { return false };
     perform(out.actions, hwnd);
     out.swallow
 }
@@ -735,6 +746,7 @@ fn reload() -> Vec<String> {
         app.engine.detector.never_switch = exceptions;
         app.engine.settings = settings;
         app.last_fg = null_mut();
+        app.files_stamp = sys::files_stamp();
         unsafe { update_tray(app, true, false) };
     });
     warnings
@@ -757,9 +769,6 @@ unsafe fn show_menu(hwnd: HWND) {
     AppendMenuW(m, MF_SEPARATOR, 0, null());
     item(ID_AUTO, t("Auto layout switching"), auto);
     item(ID_STARTUP, t("Start with Windows"), sys::startup_enabled());
-    AppendMenuW(m, MF_SEPARATOR, 0, null());
-    item(ID_FOLDER, t("Open settings folder"), false);
-    item(ID_RELOAD, t("Reload settings"), false);
     item(ID_ABOUT, t("About"), false);
     AppendMenuW(m, MF_SEPARATOR, 0, null());
     item(ID_EXIT, t("Exit"), false);
@@ -775,13 +784,6 @@ unsafe fn show_menu(hwnd: HWND) {
         ID_SETTINGS => sys::spawn_self(&["--settings"]),
         ID_AUTO => set_auto(!auto),
         ID_STARTUP => sys::set_startup(!sys::startup_enabled()),
-        ID_FOLDER => sys::open_path(&sys::data_dir()),
-        ID_RELOAD => {
-            let warn = reload();
-            if !warn.is_empty() {
-                message_box(hwnd, &i18n::f("Errors in settings.ini:\n{}", &[&warn.join("\n")]), MB_ICONWARNING);
-            }
-        }
         ID_ABOUT => {
             let s = with_app(|a| a.engine.settings.clone()).unwrap_or_default();
             let double_shift = if s.double_shift { t("Shift Shift (double press) — the same\n") } else { "" };
@@ -831,6 +833,14 @@ unsafe fn wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
             reload();
             0
         }
+        WM_SUSPEND => {
+            let until = if wparam != 0 { GetTickCount64() + SUSPEND_MS } else { 0 };
+            with_app(|app| {
+                app.suspended_until = until;
+                app.engine.reset_modifiers();
+            });
+            0
+        }
         WM_SWITCH_LAYOUT => {
             switch_layout(wparam_to_lang(wparam));
             0
@@ -853,6 +863,16 @@ unsafe fn wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
                     with_app(|app| update_tray(app, false, false));
                 }
                 TIMER_VERIFY => verify_layout(hwnd),
+                TIMER_WATCH => {
+                    // settings.ini or exceptions.txt edited by hand: apply without asking.
+                    let changed = with_app(|app| app.files_stamp != sys::files_stamp()).unwrap_or(false);
+                    if changed {
+                        let warn = reload();
+                        if !warn.is_empty() {
+                            log::warn!("settings.ini: {}", warn.join("; "));
+                        }
+                    }
+                }
                 TIMER_REHOOK => {
                     // Windows silently drops low-level hooks that were slow once; re-install periodically.
                     install_hooks();
@@ -949,6 +969,8 @@ pub fn run() {
                 pending: None,
                 slow_apps: HashSet::new(),
                 unreliable_apps: HashSet::new(),
+                suspended_until: 0,
+                files_stamp: sys::files_stamp(),
             })
         });
         with_app(|app| update_tray(app, true, true));
@@ -976,6 +998,7 @@ pub fn run() {
         }
         SetTimer(hwnd, TIMER_ICON, 250, None);
         SetTimer(hwnd, TIMER_REHOOK, 60_000, None);
+        SetTimer(hwnd, TIMER_WATCH, WATCH_MS, None);
 
         if !warnings.is_empty() {
             log::warn!("settings.ini: {}", warnings.join("; "));

@@ -112,6 +112,14 @@ pub fn key_name(vk: u8) -> String {
     }
 }
 
+/// Can this key be the main key of a hotkey (i.e. saved to settings.ini and read back)?
+pub fn is_hotkey_key(vk: u8) -> bool {
+    vk != 0 && key_vk(&key_name(vk).to_ascii_lowercase()) == Some(vk)
+}
+
+/// Sensitivity presets shown in the settings window: (value, label key).
+pub const SENSITIVITY_PRESETS: [(f32, &str); 3] = [(0.7, "Cautious"), (1.0, "Normal"), (1.4, "Bold")];
+
 fn key_vk(name: &str) -> Option<u8> {
     let vk = match name {
         "pause" | "break" => VK_PAUSE,
@@ -354,6 +362,17 @@ mod tests {
         assert!(Hotkey::parse("Ctrl+Pause").unwrap().matches(VK_CANCEL, true, false, false, false));
         assert_eq!(Hotkey::parse("none"), Some(Hotkey::NONE));
         assert!(Hotkey::parse("Ctrl+Foo").is_none());
+    }
+
+    #[test]
+    fn hotkey_keys_round_trip() {
+        for vk in [VK_PAUSE, 0x91, 0x14, 0x2D, 0x20, 0x5D, 0x2C, 0x70, 0x87, b'A', b'Z', b'0', b'9'] {
+            assert!(is_hotkey_key(vk), "{vk:#x}");
+        }
+        // Delete, arrows, Enter, Esc have no name in settings.ini
+        for vk in [0, 0x2E, 0x25, 0x0D, 0x1B, 0x10] {
+            assert!(!is_hotkey_key(vk), "{vk:#x}");
+        }
     }
 
     #[test]

@@ -21,6 +21,9 @@ pub const OLD_APP_NAME: &str = "OpenPunto";
 pub const WINDOW_CLASS: &str = "OpenSwitchWindow";
 /// Message the settings window posts to the tray app after saving.
 pub const WM_RELOAD: u32 = WM_APP + 3;
+/// Message the settings window posts while it records a hotkey: wparam 1 = let all keys
+/// through for a few seconds (the window keeps re-sending it), 0 = back to normal.
+pub const WM_SUSPEND: u32 = WM_APP + 7;
 /// Marker in dwExtraInfo of every event we inject.
 pub const OUR_MARK: usize = 0x0F_E7_C0_DE;
 
@@ -143,6 +146,20 @@ pub fn tray_window() -> HWND {
 pub fn notify_reload() -> bool {
     let h = tray_window();
     !h.is_null() && unsafe { PostMessageW(h, WM_RELOAD, 0, 0) } != 0
+}
+
+/// Ask the tray app to ignore keys (hotkeys included) while a hotkey is being recorded.
+pub fn suspend_hotkeys(on: bool) {
+    let h = tray_window();
+    if !h.is_null() {
+        unsafe { PostMessageW(h, WM_SUSPEND, on as usize, 0) };
+    }
+}
+
+/// Modification times of the settings and exception files, to notice edits made by hand.
+pub fn files_stamp() -> [Option<std::time::SystemTime>; 2] {
+    let m = |p: PathBuf| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    [m(settings_path()), m(exceptions_path())]
 }
 
 // ---------------------------------------------------------------- autostart
