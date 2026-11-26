@@ -39,6 +39,16 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
 
+  quality:
+    # Detector and spelling accuracy against the limits in examples/regress.rs.
+    needs: [fmt]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo run --release --locked --example regress
+
   installer:
     # Compiles the installer script on every change, so a broken script shows up before a release.
     needs: [fmt]
@@ -62,7 +72,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [fmt, test]
+    needs: [fmt, test, quality, installer]
     runs-on: windows-latest
     permissions:
       contents: write

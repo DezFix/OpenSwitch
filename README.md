@@ -110,6 +110,7 @@ pip install wordfreq
 python tools/gen_data.py          # пересобрать словари и модель в data/
 cargo run --release --example eval -- <список_en.txt> <список_ru.txt>
 cargo run --release --example eval_spell   # точность модуля «Орфография»
+cargo run --release --example regress      # быстрая проверка качества с порогами (её запускает CI)
 ```
 
 ## Как это работает
