@@ -860,7 +860,12 @@ unsafe fn show_menu(hwnd: HWND) {
     SetMenuDefaultItem(m, ID_SETTINGS as u32, 0);
     AppendMenuW(m, MF_SEPARATOR, 0, null());
     item(ID_AUTO, t("Auto layout switching"), auto);
-    item(ID_STARTUP, t("Start with Windows"), sys::startup_enabled());
+    if with_app(|a| a.engine.settings.run_as_admin).unwrap_or(false) {
+        // The administrator task starts it: a Run key would start a second copy at logon.
+        AppendMenuW(m, MF_STRING | MF_CHECKED | MF_GRAYED, ID_STARTUP, w(t("Start with Windows")).as_ptr());
+    } else {
+        item(ID_STARTUP, t("Start with Windows"), sys::startup_enabled());
+    }
     item(ID_ABOUT, t("About"), false);
     AppendMenuW(m, MF_SEPARATOR, 0, null());
     item(ID_EXIT, t("Exit"), false);
@@ -875,7 +880,11 @@ unsafe fn show_menu(hwnd: HWND) {
     match cmd as usize {
         ID_SETTINGS => sys::spawn_self(&["--settings"]),
         ID_AUTO => set_auto(!auto),
-        ID_STARTUP => sys::set_startup(!sys::startup_enabled()),
+        ID_STARTUP => {
+            if !with_app(|a| a.engine.settings.run_as_admin).unwrap_or(false) {
+                sys::set_startup(!sys::startup_enabled());
+            }
+        }
         ID_ABOUT => {
             let s = with_app(|a| a.engine.settings.clone()).unwrap_or_default();
             let double_shift = if s.double_shift { t("Shift Shift (double press) — the same\n") } else { "" };
