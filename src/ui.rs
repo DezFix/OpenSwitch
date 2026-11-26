@@ -13,6 +13,7 @@ use eframe::egui::{self, Align, Color32, RichText, Sense};
 use openswitch::config::{is_hotkey_key, Hotkey, Settings, SENSITIVITY_PRESETS, VK_CANCEL, VK_PAUSE};
 use openswitch::i18n::{self, t, Lang};
 
+use crate::admin::{self, Failure};
 use crate::{logging, sys};
 
 const SIDEBAR_WIDTH: f32 = 190.0;
@@ -155,6 +156,8 @@ struct SettingsApp {
     window_focused: bool,
     tray_running: bool,
     tray_checked: Instant,
+    /// "Run as administrator" being turned on/off on a worker thread (the wanted state).
+    admin_job: Option<(bool, std::thread::JoinHandle<Result<(), Failure>>)>,
 }
 
 impl SettingsApp {
@@ -189,6 +192,7 @@ impl SettingsApp {
             window_focused: true,
             tray_running: !sys::tray_window().is_null(),
             tray_checked: Instant::now(),
+            admin_job: None,
         }
     }
 
@@ -211,6 +215,31 @@ impl SettingsApp {
     fn conflict(&self) -> bool {
         let h = [&self.s.hotkey_convert_word, &self.s.hotkey_convert_selection, &self.s.hotkey_toggle_auto];
         (0..h.len()).any(|i| (i + 1..h.len()).any(|j| h[i].vk != 0 && h[i] == h[j]))
+    }
+
+    /// Finish turning "run as administrator" on/off once the worker thread is done.
+    fn poll_admin(&mut self, ctx: &egui::Context) {
+        if self.admin_job.as_ref().is_some_and(|(_, j)| !j.is_finished()) {
+            ctx.request_repaint_after(Duration::from_millis(200));
+            return;
+        }
+        let Some((on, job)) = self.admin_job.take() else { return };
+        let result = job.join().unwrap_or_else(|_| Err(Failure::Error("panic".into())));
+        self.status = Some(match result {
+            Ok(()) => {
+                // The worker already wrote it to settings.ini.
+                self.s.run_as_admin = on;
+                self.saved.run_as_admin = on;
+                (t("Changes applied").into(), true, Instant::now())
+            }
+            Err(Failure::Cancelled) => (t("Windows did not give the permission").into(), false, Instant::now()),
+            Err(Failure::Error(e)) => {
+                log::error!("run as administrator ({on}): {e}");
+                (i18n::f("Could not change it: {}", &[&e]), false, Instant::now())
+            }
+        });
+        self.autostart = sys::startup_enabled();
+        self.tray_running = !sys::tray_window().is_null();
     }
 
     /// Write changed files and tell the tray app.
@@ -327,9 +356,32 @@ impl SettingsApp {
 
         let label = t("Start OpenSwitch with Windows");
         if p.row(ui, &[label, "autostart"]) {
-            setting_row(ui, label, None, |ui| {
-                if toggle(ui, &mut self.autostart).changed() {
-                    sys::set_startup(self.autostart);
+            if self.s.run_as_admin {
+                // The administrator task starts it at logon.
+                let hint = t("With administrator rights, through the Task Scheduler");
+                setting_row(ui, label, Some(hint), |ui| ui.add_enabled_ui(false, |ui| toggle(ui, &mut true)));
+            } else {
+                setting_row(ui, label, None, |ui| {
+                    if toggle(ui, &mut self.autostart).changed() {
+                        sys::set_startup(self.autostart);
+                    }
+                });
+            }
+        }
+
+        let (label, hint) = (
+            t("Run as administrator"),
+            t("Needed to fix typing in programs started as administrator. Windows asks for permission once, then OpenSwitch starts with Windows without asking."),
+        );
+        if p.row(ui, &[label, hint, "admin", "UAC"]) {
+            setting_row(ui, label, Some(hint), |ui| {
+                if self.admin_job.is_some() {
+                    ui.spinner();
+                } else {
+                    let mut on = self.s.run_as_admin;
+                    if toggle(ui, &mut on).changed() {
+                        self.admin_job = Some((on, std::thread::spawn(move || admin::switch(on))));
+                    }
                 }
             });
         }
@@ -836,12 +888,13 @@ impl eframe::App for SettingsApp {
         ctx.request_repaint_after(Duration::from_secs(2));
 
         self.poll_recording(&ctx);
+        self.poll_admin(&ctx);
 
         egui::Panel::left("nav").exact_size(SIDEBAR_WIDTH).resizable(false).show(ui, |ui| self.sidebar(ui));
         egui::CentralPanel::default().show(ui, |ui| self.page(ui));
 
         // Apply changes right away, but not in the middle of dragging a slider.
-        let busy = ctx.input(|i| i.pointer.any_down()) || self.recording.is_some();
+        let busy = ctx.input(|i| i.pointer.any_down()) || self.recording.is_some() || self.admin_job.is_some();
         if !busy && self.dirty() {
             if self.conflict() {
                 if self.status.as_ref().is_none_or(|(_, ok, _)| *ok) {

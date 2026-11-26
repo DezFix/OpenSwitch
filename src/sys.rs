@@ -24,6 +24,8 @@ pub const WM_RELOAD: u32 = WM_APP + 3;
 /// Message the settings window posts while it records a hotkey: wparam 1 = let all keys
 /// through for a few seconds (the window keeps re-sending it), 0 = back to normal.
 pub const WM_SUSPEND: u32 = WM_APP + 7;
+/// Message asking the tray app to quit (to restart it with other rights).
+pub const WM_QUIT_APP: u32 = WM_APP + 9;
 /// Marker in dwExtraInfo of every event we inject.
 pub const OUR_MARK: usize = 0x0F_E7_C0_DE;
 
@@ -194,6 +196,32 @@ pub fn tray_window() -> HWND {
 pub fn notify_reload() -> bool {
     let h = tray_window();
     !h.is_null() && unsafe { PostMessageW(h, WM_RELOAD, 0, 0) } != 0
+}
+
+/// Close the running tray app and wait (up to 5 s) until its process has ended.
+pub fn quit_tray() {
+    let h = tray_window();
+    if h.is_null() {
+        return;
+    }
+    unsafe {
+        let mut pid = 0;
+        GetWindowThreadProcessId(h, &mut pid);
+        let process = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+        PostMessageW(h, WM_QUIT_APP, 0, 0);
+        if !process.is_null() {
+            WaitForSingleObject(process, 5000);
+            CloseHandle(process);
+        } else {
+            for _ in 0..50 {
+                if tray_window().is_null() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+    }
 }
 
 /// Ask the tray app to ignore keys (hotkeys included) while a hotkey is being recorded.

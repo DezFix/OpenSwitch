@@ -154,6 +154,9 @@ pub struct Settings {
     pub module_text: bool,
     /// Module "Spelling": typo fixes with the built-in dictionaries.
     pub module_spelling: bool,
+    /// Start with administrator rights through the Task Scheduler task (set by the settings
+    /// window together with the task itself).
+    pub run_as_admin: bool,
     /// The first-run window was shown (or skipped).
     pub setup_done: bool,
     pub auto_switch: bool,
@@ -195,6 +198,7 @@ impl Default for Settings {
             module_text: true,
             module_spelling: false,
             setup_done: false,
+            run_as_admin: false,
             auto_switch: true,
             single_letters: true,
             switch_on_enter: true,
@@ -244,6 +248,10 @@ module_spelling = false
 
 # Окно первого запуска уже показано
 setup_done = false
+
+# Запускаться с правами администратора (через задачу Планировщика «OpenSwitch»).
+# Меняйте в окне настроек: там же создаётся и удаляется сама задача.
+run_as_admin = false
 
 # Автоматически исправлять слова, набранные не в той раскладке
 auto_switch = true
@@ -332,6 +340,7 @@ impl Settings {
                 "module_text" => parse_bool(v).map(|b| s.module_text = b).is_some(),
                 "module_spelling" => parse_bool(v).map(|b| s.module_spelling = b).is_some(),
                 "setup_done" => parse_bool(v).map(|b| s.setup_done = b).is_some(),
+                "run_as_admin" => parse_bool(v).map(|b| s.run_as_admin = b).is_some(),
                 "auto_switch" => parse_bool(v).map(|b| s.auto_switch = b).is_some(),
                 "single_letters" => parse_bool(v).map(|b| s.single_letters = b).is_some(),
                 "switch_on_enter" => parse_bool(v).map(|b| s.switch_on_enter = b).is_some(),
@@ -391,6 +400,7 @@ impl Settings {
             ("module_text", b(self.module_text).to_string()),
             ("module_spelling", b(self.module_spelling).to_string()),
             ("setup_done", b(self.setup_done).to_string()),
+            ("run_as_admin", b(self.run_as_admin).to_string()),
             ("auto_switch", b(self.auto_switch).to_string()),
             ("single_letters", b(self.single_letters).to_string()),
             ("switch_on_enter", b(self.switch_on_enter).to_string()),
@@ -521,6 +531,7 @@ mod tests {
         let m = Settings {
             auto_switch: false,
             skip_passwords: false,
+            run_as_admin: true,
             sensitivity: 1.5,
             hotkey_convert_word: Hotkey::parse("Ctrl+Shift+F12").unwrap(),
             hotkey_toggle_auto: Hotkey::NONE,
@@ -531,6 +542,7 @@ mod tests {
         assert!(w.is_empty(), "{w:?}");
         assert!(!p.auto_switch);
         assert!(!p.skip_passwords);
+        assert!(p.run_as_admin && !d.run_as_admin);
         assert!(d.skip_passwords && s.skip_passwords);
         assert_eq!(p.sensitivity, 1.5);
         assert_eq!(p.hotkey_convert_word, m.hotkey_convert_word);

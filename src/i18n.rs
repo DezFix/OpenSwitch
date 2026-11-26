@@ -144,6 +144,14 @@ const RU: &[(&str, &str)] = &[
     ("Fix selected text", "Исправить выделенный текст"),
     ("Enable/disable auto switching", "Вкл/выкл автопереключение"),
     ("Restore default keys", "Вернуть клавиши по умолчанию"),
+    ("Run as administrator", "Запускать с правами администратора"),
+    (
+        "Needed to fix typing in programs started as administrator. Windows asks for permission once, then OpenSwitch starts with Windows without asking.",
+        "Нужно, чтобы исправлять текст в программах, запущенных от администратора. Windows спросит разрешение один раз, дальше OpenSwitch запускается с Windows без вопросов.",
+    ),
+    ("With administrator rights, through the Task Scheduler", "С правами администратора, через Планировщик заданий"),
+    ("Windows did not give the permission", "Windows не дала разрешения"),
+    ("Could not change it: {}", "Не удалось изменить: {}"),
     ("Do nothing in password fields", "Ничего не делать в полях пароля"),
     (
         "Nothing is fixed or remembered while you type a password (also in browsers)",
@@ -328,6 +336,14 @@ const UK: &[(&str, &str)] = &[
     ("Fix selected text", "Виправити виділений текст"),
     ("Enable/disable auto switching", "Увімк./вимк. автоперемикання"),
     ("Restore default keys", "Повернути клавіші типовими"),
+    ("Run as administrator", "Запускати з правами адміністратора"),
+    (
+        "Needed to fix typing in programs started as administrator. Windows asks for permission once, then OpenSwitch starts with Windows without asking.",
+        "Потрібно, щоб виправляти текст у програмах, запущених від адміністратора. Windows запитає дозвіл один раз, далі OpenSwitch запускається з Windows без запитань.",
+    ),
+    ("With administrator rights, through the Task Scheduler", "З правами адміністратора, через Планувальник завдань"),
+    ("Windows did not give the permission", "Windows не дала дозволу"),
+    ("Could not change it: {}", "Не вдалося змінити: {}"),
     ("Do nothing in password fields", "Нічого не робити в полях пароля"),
     (
         "Nothing is fixed or remembered while you type a password (also in browsers)",

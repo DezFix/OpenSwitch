@@ -21,9 +21,10 @@ use openswitch::engine::{Action, Engine};
 use openswitch::i18n::{self, t};
 use openswitch::layout::{Lang, Layouts};
 
+use crate::admin;
 use crate::clipboard;
 use crate::password::{self, WM_PASSWORD};
-use crate::sys::{self, w, APP_NAME, OUR_MARK, WINDOW_CLASS, WM_RELOAD, WM_SUSPEND};
+use crate::sys::{self, w, APP_NAME, OUR_MARK, WINDOW_CLASS, WM_QUIT_APP, WM_RELOAD, WM_SUSPEND};
 
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
@@ -924,6 +925,11 @@ unsafe fn wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
             reload();
             0
         }
+        WM_QUIT_APP => {
+            log::info!("asked to quit (restart with other rights)");
+            DestroyWindow(hwnd);
+            0
+        }
         WM_SUSPEND => {
             let until = if wparam != 0 { GetTickCount64() + SUSPEND_MS } else { 0 };
             with_app(|app| {
@@ -999,19 +1005,66 @@ unsafe fn wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
     }
 }
 
+/// Take the single-instance mutex; null if another copy holds it. A copy running with
+/// administrator rights makes the call fail with "access denied" instead of "already exists".
+unsafe fn single_instance() -> HANDLE {
+    let m = CreateMutexW(null(), 1, w("Local\\OpenSwitch.SingleInstance").as_ptr());
+    let err = GetLastError();
+    if m.is_null() || err == ERROR_ALREADY_EXISTS || err == ERROR_ACCESS_DENIED {
+        if !m.is_null() {
+            CloseHandle(m);
+        }
+        return null_mut();
+    }
+    m
+}
+
 pub fn run() {
     unsafe {
-        let mutex = CreateMutexW(null(), 1, w("Local\\OpenSwitch.SingleInstance").as_ptr());
-        if GetLastError() == ERROR_ALREADY_EXISTS {
-            // Already running: open the settings window instead of a second tray icon.
-            log::info!("already running, opening settings instead");
-            sys::spawn_self(&["--settings"]);
+        let from_task = std::env::args().any(|a| a == admin::FROM_TASK);
+        let elevated = admin::is_elevated();
+        let mut mutex = single_instance();
+        if from_task {
+            // Started by the task: the copy that ran the task may still be closing.
+            for _ in 0..30 {
+                if !mutex.is_null() {
+                    break;
+                }
+                Sleep(100);
+                mutex = single_instance();
+            }
+        }
+        if mutex.is_null() {
+            if !from_task {
+                // Already running: open the settings window instead of a second tray icon.
+                log::info!("already running, opening settings instead");
+                sys::spawn_self(&["--settings"]);
+            }
             return;
         }
         // DPI awareness (Per-Monitor V2) is declared in the application manifest.
         sys::migrate_startup();
 
         let (settings, warnings) = sys::load_settings();
+        if settings.run_as_admin && !elevated && !from_task {
+            // "Run as administrator" is on: let the task start the elevated copy (no UAC).
+            ReleaseMutex(mutex);
+            CloseHandle(mutex);
+            if admin::run_task() {
+                log::info!("started the administrator task, exiting");
+                return;
+            }
+            log::warn!("could not start the administrator task, running without administrator rights");
+            mutex = single_instance();
+            if mutex.is_null() {
+                return;
+            }
+        }
+        if settings.run_as_admin && elevated && sys::startup_enabled() {
+            // The task starts us at logon: a second start from the Run key is not needed.
+            sys::set_startup(false);
+        }
+        log::info!("administrator rights: {elevated}");
         i18n::set(i18n::resolve(&settings.language));
         let mut detector = Detector::new();
         detector.never_switch = sys::load_exceptions();
@@ -1057,6 +1110,11 @@ pub fn run() {
         }
         MAIN_HWND.store(hwnd as usize, Ordering::SeqCst);
         let taskbar_created = RegisterWindowMessageW(w("TaskbarCreated").as_ptr());
+        // With administrator rights Windows drops messages from normal programs (the shell,
+        // our settings window started by hand): let ours through.
+        for m in [WM_TRAY, WM_RELOAD, WM_SUSPEND, WM_QUIT_APP, taskbar_created] {
+            ChangeWindowMessageFilterEx(hwnd, m, MSGFLT_ALLOW, null_mut());
+        }
 
         APP.with(|a| {
             *a.borrow_mut() = Some(App {

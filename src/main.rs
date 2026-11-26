@@ -8,6 +8,8 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 #[cfg(windows)]
+mod admin;
+#[cfg(windows)]
 mod clipboard;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod logging;
@@ -24,6 +26,12 @@ mod win;
 
 #[cfg(windows)]
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == admin::HELPER) {
+        // Elevated helper started by the settings window: create or delete the task.
+        logging::init("admin");
+        std::process::exit(admin::helper(args.get(i + 1).map(|s| s.as_str()) == Some("on")));
+    }
     if std::env::args().any(|a| a == "--settings" || a == "/settings") {
         logging::init("settings");
         ui::run();

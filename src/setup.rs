@@ -157,11 +157,14 @@ impl SetupApp {
             }
         }
         ui.add_space(10.0);
-        setting_row(ui, t("Start OpenSwitch with Windows"), None, |ui| {
-            if toggle(ui, &mut self.autostart).changed() {
-                sys::set_startup(self.autostart);
-            }
-        });
+        // With "run as administrator" the task starts it; a Run key would start a second copy.
+        if !self.s.run_as_admin {
+            setting_row(ui, t("Start OpenSwitch with Windows"), None, |ui| {
+                if toggle(ui, &mut self.autostart).changed() {
+                    sys::set_startup(self.autostart);
+                }
+            });
+        }
     }
 
     fn ready(&mut self, ui: &mut egui::Ui) {
