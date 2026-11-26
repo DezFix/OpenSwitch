@@ -160,6 +160,8 @@ pub struct Settings {
     pub skip_code: bool,
     /// Be more careful with the first word after the user switched the layout themselves.
     pub careful_after_switch: bool,
+    /// Remember words fixed by hand (Pause / Shift Shift) and fix them automatically next time.
+    pub learn_manual: bool,
     pub sensitivity: f32,
     pub hotkey_convert_word: Hotkey,
     pub hotkey_convert_selection: Hotkey,
@@ -181,6 +183,7 @@ impl Default for Settings {
             fix_caps: true,
             skip_code: true,
             careful_after_switch: true,
+            learn_manual: true,
             sensitivity: 1.0,
             hotkey_convert_word: Hotkey { vk: VK_PAUSE, ..Hotkey::NONE },
             hotkey_convert_selection: Hotkey { vk: VK_PAUSE, shift: true, ..Hotkey::NONE },
@@ -230,6 +233,9 @@ skip_code = true
 
 # Осторожнее с первым словом после того, как вы сами переключили раскладку
 careful_after_switch = true
+
+# Запоминать слова, исправленные вручную (Pause), и дальше исправлять их сразу (always.txt)
+learn_manual = true
 
 # Чувствительность автопереключения: 0.5 (осторожно) ... 2.0 (агрессивно)
 sensitivity = 1.0
@@ -283,6 +289,7 @@ impl Settings {
                 "fix_caps" => parse_bool(v).map(|b| s.fix_caps = b).is_some(),
                 "skip_code" => parse_bool(v).map(|b| s.skip_code = b).is_some(),
                 "careful_after_switch" => parse_bool(v).map(|b| s.careful_after_switch = b).is_some(),
+                "learn_manual" => parse_bool(v).map(|b| s.learn_manual = b).is_some(),
                 "sensitivity" => v.parse::<f32>().ok().filter(|x| *x > 0.0).map(|x| s.sensitivity = x).is_some(),
                 "language" => {
                     let code = v.to_ascii_lowercase();
@@ -329,6 +336,7 @@ impl Settings {
             ("fix_caps", b(self.fix_caps).to_string()),
             ("skip_code", b(self.skip_code).to_string()),
             ("careful_after_switch", b(self.careful_after_switch).to_string()),
+            ("learn_manual", b(self.learn_manual).to_string()),
             ("sensitivity", format!("{:.2}", self.sensitivity)),
             ("language", self.language.clone()),
             ("hotkey_convert_word", self.hotkey_convert_word.to_string()),

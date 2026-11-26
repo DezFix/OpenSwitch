@@ -31,6 +31,8 @@ const FORCED_LAYOUT_MS: u64 = 1000;
 const CAREFUL: f32 = 0.75;
 /// Shortest word for the CapsLock fix (пРИВЕТ -> Привет).
 const CAPS_FIX_MIN: usize = 3;
+/// Shortest word learned from a manual fix.
+const LEARN_MIN: usize = 2;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
@@ -48,6 +50,10 @@ pub enum Action {
     ToggleAuto,
     /// Remember a word that must never be auto-converted again (persist it).
     AddException(String),
+    /// Remember a word that must always be converted (learned from a manual fix).
+    Learn(String),
+    /// Drop a learned word again (the user put it back).
+    Forget(String),
 }
 
 #[derive(Debug, Default)]
@@ -78,6 +84,10 @@ struct Word {
     original: Option<Vec<KeyStroke>>,
     /// The user switched the layout themselves right before this word.
     after_switch: bool,
+    /// Fixed by hand before it was finished: learn it at the word boundary.
+    learn_pending: bool,
+    /// Learned (added to `always_switch`) from this word.
+    learned: bool,
 }
 
 /// Word typed with CapsLock on by accident: Shift held for the first letter only, so it came
@@ -340,6 +350,8 @@ impl Engine {
                         manual: false,
                         original: None,
                         after_switch,
+                        learn_pending: false,
+                        learned: false,
                     })
                 }
             }
@@ -398,13 +410,21 @@ impl Engine {
                 return Output { swallow: true, actions };
             }
         }
+        let mut out = Output::pass();
         if w.trailing == 0 {
             self.prev_lang = Some(w.shown_lang);
+            if w.learn_pending {
+                w.learn_pending = false;
+                w.learned = true;
+                let word = self.detector.layouts.render(&w.keys, w.typed_lang).to_lowercase();
+                self.detector.always_switch.insert(word.clone());
+                out.actions.push(Action::Learn(word));
+            }
         }
         if vk == VK_SPACE {
             w.trailing += 1;
         }
-        Output::pass()
+        out
     }
 
     /// Backspace right after an automatic fix (word + the space that triggered it): put the
@@ -450,12 +470,36 @@ impl Engine {
         let mut text = self.detector.layouts.render(&w.keys, to);
         text.push_str(&" ".repeat(w.trailing));
         let mut actions = vec![Action::Backspace(n), Action::Type(text), Action::SwitchLayout(to)];
-        if w.auto && to == w.typed_lang {
+        let reverting = to == w.typed_lang;
+        let word = self.detector.layouts.render(&w.keys, w.typed_lang).to_lowercase();
+        if w.auto && reverting {
             // The user reverted an automatic correction: never touch this word again.
-            let word = self.detector.layouts.render(&w.keys, w.typed_lang).to_lowercase();
+            if self.detector.always_switch.remove(&word) {
+                actions.push(Action::Forget(word.clone()));
+            }
             self.detector.never_switch.insert(word.clone());
             actions.push(Action::AddException(word));
             w.auto = false;
+        } else if reverting {
+            // Fixed by hand and put back: nothing to learn.
+            w.learn_pending = false;
+            if w.learned && self.detector.always_switch.remove(&word) {
+                actions.push(Action::Forget(word));
+            }
+            w.learned = false;
+        } else if self.settings.learn_manual
+            && !w.auto
+            && w.keys.len() >= LEARN_MIN
+            && !self.detector.never_switch.contains(&word)
+        {
+            // Fixed by hand: the detector missed it. Learn it once the word is finished.
+            if w.trailing > 0 {
+                w.learned = true;
+                self.detector.always_switch.insert(word.clone());
+                actions.push(Action::Learn(word));
+            } else {
+                w.learn_pending = true;
+            }
         }
         w.shown_lang = to;
         w.manual = true;
@@ -631,6 +675,57 @@ mod tests {
         e.reset();
         typ(&mut e, "hello", Lang::En, &mut t);
         assert!(!e.word.as_ref().unwrap().after_switch);
+    }
+
+    #[test]
+    fn learn_from_manual_fix() {
+        let mut e = Engine::new(Detector::new(), Settings { auto_switch: true, ..Settings::default() });
+        let mut t = 0;
+        // "ghbdtn" is fixed automatically anyway; take a word the detector keeps: "here"
+        typ(&mut e, "here", Lang::En, &mut t);
+        assert!(!space(&mut e, Lang::En, &mut t).swallow);
+        // fixed by hand after the space -> learned right away
+        let o = e.on_key(crate::config::VK_PAUSE, true, t + 50, Some(Lang::En), true);
+        assert_eq!(o.actions[1], Action::Type("руку ".into()));
+        assert_eq!(o.actions.last(), Some(&Action::Learn("here".into())));
+        // next time it is fixed automatically
+        t += 2000;
+        e.reset();
+        typ(&mut e, "here", Lang::En, &mut t);
+        let o = space(&mut e, Lang::En, &mut t);
+        assert!(o.swallow);
+        assert_eq!(o.actions[1], Action::Type("руку".into()));
+        // reverting that automatic fix forgets it and makes it an exception
+        let o = e.on_key(crate::config::VK_PAUSE, true, t + 50, Some(Lang::Ru), true);
+        assert!(o.actions.contains(&Action::Forget("here".into())));
+        assert!(o.actions.contains(&Action::AddException("here".into())));
+    }
+
+    #[test]
+    fn learn_waits_for_the_end_of_the_word() {
+        let mut e = Engine::new(Detector::new(), Settings::default());
+        let mut t = 0;
+        typ(&mut e, "here", Lang::En, &mut t);
+        // Pause before the space: nothing learned yet (the word may go on)
+        let o = e.on_key(crate::config::VK_PAUSE, true, t, Some(Lang::En), true);
+        assert!(!o.actions.iter().any(|a| matches!(a, Action::Learn(_))));
+        let o = space(&mut e, Lang::Ru, &mut t);
+        assert!(!o.swallow);
+        assert_eq!(o.actions, vec![Action::Learn("here".into())]);
+
+        // converted and converted back: nothing learned
+        let mut e = Engine::new(Detector::new(), Settings::default());
+        typ(&mut e, "here", Lang::En, &mut t);
+        e.on_key(crate::config::VK_PAUSE, true, t, Some(Lang::En), true);
+        e.on_key(crate::config::VK_PAUSE, true, t + 10, Some(Lang::Ru), true);
+        assert!(space(&mut e, Lang::En, &mut t).actions.is_empty());
+
+        // and with the option off nothing is learned
+        let mut e = Engine::new(Detector::new(), Settings { learn_manual: false, ..Settings::default() });
+        typ(&mut e, "here", Lang::En, &mut t);
+        space(&mut e, Lang::En, &mut t);
+        let o = e.on_key(crate::config::VK_PAUSE, true, t + 50, Some(Lang::En), true);
+        assert!(!o.actions.iter().any(|a| matches!(a, Action::Learn(_))));
     }
 
     #[test]

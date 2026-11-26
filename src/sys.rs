@@ -47,6 +47,12 @@ pub fn settings_path() -> PathBuf {
 pub fn exceptions_path() -> PathBuf {
     data_dir().join("exceptions.txt")
 }
+pub fn always_path() -> PathBuf {
+    data_dir().join("always.txt")
+}
+
+const ALWAYS_HEADER: &str = "# Слова, которые OpenSwitch всегда исправляет (выучены из ваших ручных исправлений).\r\n\
+# По одному на строку, в той раскладке, в которой вы их набираете.\r\n";
 
 const EXCEPTIONS_HEADER: &str = "# Слова, которые OpenSwitch никогда не будет исправлять автоматически.\r\n\
 # По одному на строку, в той раскладке, в которой вы их набираете.\r\n\
@@ -104,6 +110,33 @@ pub fn save_exceptions(words: &[String]) -> std::io::Result<()> {
     std::fs::write(exceptions_path(), t)
 }
 
+/// Words learned from manual fixes (always.txt; missing file = empty list).
+pub fn load_always() -> std::collections::HashSet<String> {
+    std::fs::read_to_string(always_path()).map(|t| parse_exceptions(&t)).unwrap_or_default()
+}
+
+pub fn save_always(words: &[String]) -> std::io::Result<()> {
+    ensure_data_dir();
+    let mut t = String::from(ALWAYS_HEADER);
+    for word in words {
+        t.push_str(word);
+        t.push_str("\r\n");
+    }
+    std::fs::write(always_path(), t)
+}
+
+/// Add or remove one learned word.
+pub fn update_always(word: &str, add: bool) {
+    let mut words: Vec<String> = load_always().into_iter().filter(|w| w != word).collect();
+    if add {
+        words.push(word.to_string());
+    }
+    words.sort();
+    if let Err(e) = save_always(&words) {
+        log::error!("could not write always.txt: {e}");
+    }
+}
+
 pub fn append_exception(word: &str) {
     use std::io::Write;
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(exceptions_path()) {
@@ -157,9 +190,9 @@ pub fn suspend_hotkeys(on: bool) {
 }
 
 /// Modification times of the settings and exception files, to notice edits made by hand.
-pub fn files_stamp() -> [Option<std::time::SystemTime>; 2] {
+pub fn files_stamp() -> [Option<std::time::SystemTime>; 3] {
     let m = |p: PathBuf| std::fs::metadata(p).and_then(|m| m.modified()).ok();
-    [m(settings_path()), m(exceptions_path())]
+    [m(settings_path()), m(exceptions_path()), m(always_path())]
 }
 
 // ---------------------------------------------------------------- autostart

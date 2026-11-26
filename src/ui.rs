@@ -112,6 +112,10 @@ struct SettingsApp {
     saved: Settings,
     words: Vec<String>,
     saved_words: Vec<String>,
+    /// Words learned from manual fixes (always.txt).
+    always: Vec<String>,
+    saved_always: Vec<String>,
+    new_always: String,
     autostart: bool,
     search: String,
     /// Highlighted menu item.
@@ -140,11 +144,15 @@ impl SettingsApp {
     fn new() -> Self {
         let (s, _) = sys::load_settings();
         let words = load_words();
+        let always = sorted(sys::load_always());
         SettingsApp {
             saved: s.clone(),
             s,
             saved_words: words.clone(),
             words,
+            saved_always: always.clone(),
+            always,
+            new_always: String::new(),
             autostart: sys::startup_enabled(),
             search: String::new(),
             active: Section::General,
@@ -167,7 +175,7 @@ impl SettingsApp {
     }
 
     fn dirty(&self) -> bool {
-        self.s.to_text() != self.saved.to_text() || self.words != self.saved_words
+        self.s.to_text() != self.saved.to_text() || self.words != self.saved_words || self.always != self.saved_always
     }
 
     /// Re-read the files (the tray menu or a text editor may have changed them).
@@ -177,6 +185,8 @@ impl SettingsApp {
         self.s = s;
         self.words = load_words();
         self.saved_words = self.words.clone();
+        self.always = sorted(sys::load_always());
+        self.saved_always = self.always.clone();
         self.autostart = sys::startup_enabled();
     }
 
@@ -193,6 +203,9 @@ impl SettingsApp {
         }
         if result.is_ok() && self.words != self.saved_words {
             result = sys::save_exceptions(&self.words);
+        }
+        if result.is_ok() && self.always != self.saved_always {
+            result = sys::save_always(&self.always);
         }
         match result {
             Ok(()) => {
@@ -497,38 +510,33 @@ impl SettingsApp {
 
     fn words(&mut self, ui: &mut egui::Ui, p: &mut Page) {
         p.begin(Section::Words);
-        let label = t("Exception words");
-        let hint =
-            t("These words are never fixed automatically. Write them the way you type them (e.g. «ctx» or «git»).");
-        let hint2 = t("A word is added here by itself when you undo its automatic fix.");
-        let mut texts: Vec<&str> = vec![label, hint, hint2];
-        texts.extend(self.words.iter().map(|s| s.as_str()));
-        if !p.row(ui, &texts) {
-            return;
+        let (label, hint) =
+            (t("Learn from my fixes"), t("A word you fixed by hand with a hotkey is fixed automatically next time"));
+        if p.row(ui, &[label, hint]) {
+            setting_row(ui, label, Some(hint), |ui| toggle(ui, &mut self.s.learn_manual));
         }
-        ui.label(label);
-        ui.label(RichText::new(hint).small().weak());
-        ui.label(RichText::new(hint2).small().weak());
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            let r =
-                ui.add(egui::TextEdit::singleline(&mut self.new_word).hint_text(t("new word")).desired_width(180.0));
-            let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if ui.button(t("Add")).clicked() || enter {
-                let wd = self.new_word.trim().to_lowercase();
-                if !wd.is_empty() && !self.words.contains(&wd) {
-                    self.words.push(wd);
-                    self.words.sort();
-                }
-                self.new_word.clear();
-            }
-        });
-        ui.add_space(4.0);
-        let general = p.all || !p.filtering() || p.hit(label) || p.hit(hint) || p.hit(hint2);
-        let shown: Vec<&String> = self.words.iter().filter(|w| general || p.hit(w)).collect();
-        if let Some(remove) = removable_list(ui, &shown, t("No words yet")) {
-            self.words.retain(|w| *w != remove);
-        }
+        word_list(
+            ui,
+            p,
+            t("Never fix"),
+            &[
+                t("These words are never fixed automatically. Write them the way you type them (e.g. «ctx» or «git»)."),
+                t("A word is added here by itself when you undo its automatic fix."),
+            ],
+            &mut self.words,
+            &mut self.new_word,
+        );
+        word_list(
+            ui,
+            p,
+            t("Always fix"),
+            &[
+                t("These words are always fixed. Write them the way you type them by mistake (e.g. «ghbdtn»)."),
+                t("Words you fixed by hand get here by themselves."),
+            ],
+            &mut self.always,
+            &mut self.new_always,
+        );
     }
 
     fn about(&mut self, ui: &mut egui::Ui, p: &mut Page) {
@@ -773,6 +781,47 @@ fn toggle(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
     r
 }
 
+/// A word list block: title, hints, an input to add words and the chips.
+fn word_list(
+    ui: &mut egui::Ui,
+    p: &mut Page,
+    label: &str,
+    hints: &[&str],
+    words: &mut Vec<String>,
+    new_word: &mut String,
+) {
+    let mut texts: Vec<&str> = vec![label];
+    texts.extend(hints);
+    texts.extend(words.iter().map(|s| s.as_str()));
+    if !p.row(ui, &texts) {
+        return;
+    }
+    ui.add_space(8.0);
+    ui.label(label);
+    for h in hints {
+        ui.label(RichText::new(*h).small().weak());
+    }
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        let r = ui.add(egui::TextEdit::singleline(new_word).hint_text(t("new word")).desired_width(180.0));
+        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if ui.button(t("Add")).clicked() || enter {
+            let wd = new_word.trim().to_lowercase();
+            if !wd.is_empty() && !words.contains(&wd) {
+                words.push(wd);
+                words.sort();
+            }
+            new_word.clear();
+        }
+    });
+    ui.add_space(4.0);
+    let general = p.all || !p.filtering() || p.hit(label) || hints.iter().any(|h| p.hit(h));
+    let shown: Vec<&String> = words.iter().filter(|w| general || p.hit(w)).collect();
+    if let Some(remove) = removable_list(ui, &shown, t("No words yet")) {
+        words.retain(|w| *w != remove);
+    }
+}
+
 /// Items as compact chips with a remove cross, wrapped over lines (no inner scrolling: the
 /// page itself scrolls). Returns the item to remove.
 fn removable_list(ui: &mut egui::Ui, items: &[&String], empty: &str) -> Option<String> {
@@ -797,7 +846,11 @@ fn removable_list(ui: &mut egui::Ui, items: &[&String], empty: &str) -> Option<S
 }
 
 fn load_words() -> Vec<String> {
-    let mut words: Vec<String> = sys::load_exceptions().into_iter().collect();
+    sorted(sys::load_exceptions())
+}
+
+fn sorted(set: std::collections::HashSet<String>) -> Vec<String> {
+    let mut words: Vec<String> = set.into_iter().collect();
     words.sort();
     words
 }

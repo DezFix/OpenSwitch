@@ -89,7 +89,7 @@ struct App {
     /// Keys are passed through untouched until this tick (the settings window records a hotkey).
     suspended_until: u64,
     /// Modification times of settings.ini / exceptions.txt when they were last read.
-    files_stamp: [Option<std::time::SystemTime>; 2],
+    files_stamp: [Option<std::time::SystemTime>; 3],
 }
 
 thread_local! {
@@ -476,13 +476,40 @@ fn perform(actions: Vec<Action>, hwnd: HWND) {
             Action::ToggleAuto => unsafe {
                 PostMessageW(hwnd, WM_TOGGLE_AUTO, 0, 0);
             },
-            Action::AddException(word) => {
-                // File I/O off the hook thread.
-                std::thread::spawn(move || sys::append_exception(&word));
-            }
+            Action::AddException(word) => file_job(FileJob::Exception(word)),
+            Action::Learn(word) => file_job(FileJob::Always(word, true)),
+            Action::Forget(word) => file_job(FileJob::Always(word, false)),
         }
     }
     send(&inputs);
+}
+
+enum FileJob {
+    Exception(String),
+    Always(String, bool),
+}
+
+/// File writes requested from the hook run on one worker thread, in order (a word learned
+/// and forgotten right after must end up forgotten).
+fn file_job(job: FileJob) {
+    use std::sync::mpsc::{channel, Sender};
+    use std::sync::{Mutex, OnceLock};
+    static TX: OnceLock<Mutex<Sender<FileJob>>> = OnceLock::new();
+    let tx = TX.get_or_init(|| {
+        let (tx, rx) = channel::<FileJob>();
+        std::thread::spawn(move || {
+            for job in rx {
+                match job {
+                    FileJob::Exception(w) => sys::append_exception(&w),
+                    FileJob::Always(w, add) => sys::update_always(&w, add),
+                }
+            }
+        });
+        Mutex::new(tx)
+    });
+    if let Ok(tx) = tx.lock() {
+        let _ = tx.send(job);
+    }
 }
 
 fn lang_to_wparam(l: Lang) -> WPARAM {
@@ -740,11 +767,13 @@ fn reload() -> Vec<String> {
     log::info!("settings reloaded ({} warnings)", warnings.len());
     i18n::set(i18n::resolve(&settings.language));
     let exceptions = sys::load_exceptions();
+    let always = sys::load_always();
     with_app(|app| {
         app.engine.detector.sensitivity = settings.sensitivity;
         app.engine.detector.single_letters = settings.single_letters;
         app.engine.detector.skip_code = settings.skip_code;
         app.engine.detector.never_switch = exceptions;
+        app.engine.detector.always_switch = always;
         app.engine.settings = settings;
         app.last_fg = null_mut();
         app.files_stamp = sys::files_stamp();
@@ -914,6 +943,7 @@ pub fn run() {
         i18n::set(i18n::resolve(&settings.language));
         let mut detector = Detector::new();
         detector.never_switch = sys::load_exceptions();
+        detector.always_switch = sys::load_always();
         detector.sensitivity = settings.sensitivity;
         detector.single_letters = settings.single_letters;
         detector.skip_code = settings.skip_code;

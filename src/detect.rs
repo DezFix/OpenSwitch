@@ -189,6 +189,9 @@ pub struct Detector {
     uk: Option<LangModel>,
     /// Words (in the layout they were typed) the user never wants converted.
     pub never_switch: HashSet<String>,
+    /// Words (in the layout they were typed) that are always converted: learned from manual
+    /// fixes. `never_switch` wins if a word is in both.
+    pub always_switch: HashSet<String>,
     /// Higher = more aggressive auto switching. 1.0 = default.
     pub sensitivity: f32,
     /// Convert one-letter words like "d" -> "в".
@@ -212,6 +215,7 @@ impl Detector {
             ru: LangModel::new(Model::Ru),
             uk: None,
             never_switch: HashSet::new(),
+            always_switch: HashSet::new(),
             sensitivity: 1.0,
             single_letters: true,
             skip_code: true,
@@ -276,6 +280,11 @@ impl Detector {
         let key = raw_cur.to_lowercase();
         if self.never_switch.contains(&key) {
             v.reason = "user exception";
+            return v;
+        }
+        if self.always_switch.contains(&key) {
+            v.switch = true;
+            v.reason = "learned from a manual fix";
             return v;
         }
         if self.skip_code && cur == Lang::En && looks_like_code(&raw_cur) {

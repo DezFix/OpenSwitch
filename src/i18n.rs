@@ -155,7 +155,6 @@ const RU: &[(&str, &str)] = &[
     ("Update window list", "Обновить список окон"),
     ("List is empty", "Список пуст"),
     ("Remove", "Убрать"),
-    ("Exception words", "Слова-исключения"),
     (
         "These words are never fixed automatically. Write them the way you type them (e.g. «ctx» or «git»).",
         "Эти слова никогда не исправляются автоматически. Пишите их так, как набираете (например «ctx» или «git»).",
@@ -232,6 +231,12 @@ const RU: &[(&str, &str)] = &[
     ("github.com, readme.md, getValue", "github.com, readme.md, getValue"),
     ("Be careful after you switch the layout yourself", "Осторожнее после ручного переключения раскладки"),
     ("The first word after a manual switch is fixed only when it is clearly wrong", "Первое слово после ручного переключения исправляется, только если ошибка очевидна"),
+    ("Learn from my fixes", "Учиться на моих исправлениях"),
+    ("A word you fixed by hand with a hotkey is fixed automatically next time", "Слово, которое вы исправили вручную клавишей, в следующий раз исправится само"),
+    ("Never fix", "Никогда не исправлять"),
+    ("Always fix", "Всегда исправлять"),
+    ("These words are always fixed. Write them the way you type them by mistake (e.g. «ghbdtn»).", "Эти слова исправляются всегда. Пишите их так, как набираете по ошибке (например «ghbdtn»)."),
+    ("Words you fixed by hand get here by themselves.", "Слова, которые вы исправили вручную, попадают сюда сами."),
 ];
 
 const UK: &[(&str, &str)] = &[
@@ -274,7 +279,6 @@ const UK: &[(&str, &str)] = &[
     ("Update window list", "Оновити список вікон"),
     ("List is empty", "Список порожній"),
     ("Remove", "Прибрати"),
-    ("Exception words", "Слова-винятки"),
     (
         "These words are never fixed automatically. Write them the way you type them (e.g. «ctx» or «git»).",
         "Ці слова ніколи не виправляються автоматично. Пишіть їх так, як набираєте (наприклад «ctx» або «git»).",
@@ -351,6 +355,12 @@ const UK: &[(&str, &str)] = &[
     ("github.com, readme.md, getValue", "github.com, readme.md, getValue"),
     ("Be careful after you switch the layout yourself", "Обережніше після ручного перемикання розкладки"),
     ("The first word after a manual switch is fixed only when it is clearly wrong", "Перше слово після ручного перемикання виправляється, лише якщо помилка очевидна"),
+    ("Learn from my fixes", "Вчитися на моїх виправленнях"),
+    ("A word you fixed by hand with a hotkey is fixed automatically next time", "Слово, яке ви виправили вручну клавішею, наступного разу виправиться саме"),
+    ("Never fix", "Ніколи не виправляти"),
+    ("Always fix", "Завжди виправляти"),
+    ("These words are always fixed. Write them the way you type them by mistake (e.g. «ghbdtn»).", "Ці слова виправляються завжди. Пишіть їх так, як набираєте помилково (наприклад «ghbdtn»)."),
+    ("Words you fixed by hand get here by themselves.", "Слова, які ви виправили вручну, потрапляють сюди самі."),
 ];
 
 #[cfg(test)]
