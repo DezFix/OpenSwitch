@@ -6,3 +6,4 @@ pub mod i18n;
 pub mod layout;
 pub mod spelling;
 pub mod text;
+pub mod update;

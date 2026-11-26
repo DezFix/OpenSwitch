@@ -238,6 +238,13 @@ pub fn file_dialog(save: bool) -> Option<PathBuf> {
     Some(PathBuf::from(String::from_utf16_lossy(&buf[..n])))
 }
 
+/// Open a web page in the default browser (only our own GitHub pages are passed here).
+pub fn open_url(url: &str) {
+    if url.starts_with("https://github.com/DezFix/OpenSwitch/") {
+        open_path(Path::new(url));
+    }
+}
+
 pub fn open_path(p: &Path) {
     unsafe {
         ShellExecuteW(

@@ -24,6 +24,8 @@ mod sys;
 #[cfg(windows)]
 mod ui;
 #[cfg(windows)]
+mod updates;
+#[cfg(windows)]
 mod win;
 
 #[cfg(windows)]

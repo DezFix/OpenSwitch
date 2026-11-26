@@ -158,6 +158,9 @@ struct SettingsApp {
     tray_checked: Instant,
     /// The theme the window shows now.
     theme_shown: String,
+    /// "Check now" running on a worker thread, and the answer of the last one.
+    update_job: Option<std::thread::JoinHandle<crate::updates::Check>>,
+    update_result: Option<crate::updates::Check>,
     /// The tray app's recent fixes and when they were read.
     recent: Vec<openswitch::engine::Fix>,
     recent_read: Instant,
@@ -198,6 +201,8 @@ impl SettingsApp {
             tray_running: !sys::tray_window().is_null(),
             tray_checked: Instant::now(),
             theme_shown: String::new(),
+            update_job: None,
+            update_result: None,
             recent: crate::history::read(),
             recent_read: Instant::now(),
             admin_job: None,
@@ -813,7 +818,7 @@ impl SettingsApp {
         if p.row(ui, &[&version, what, t("License: GNU GPL v3.0 or later."), "github"]) {
             ui.label(RichText::new(&version).strong());
             ui.label(what);
-            ui.label(RichText::new(t("• Works offline, sends nothing anywhere.")).weak());
+            ui.label(RichText::new(t("• Works offline; what you type never leaves the computer. Only the update check, if you turn it on, asks GitHub for the latest version number.")).weak());
             ui.label(RichText::new(t("• Dictionaries: the wordfreq project (CC BY-SA 4.0).")).weak());
             ui.label(RichText::new(t("License: GNU GPL v3.0 or later.")).weak());
             ui.hyperlink_to(t("Source code on GitHub"), "https://github.com/DezFix/OpenSwitch");
@@ -838,6 +843,44 @@ impl SettingsApp {
                     sys::open_path(&sys::data_dir());
                 }
             });
+        }
+
+        let (label, hint) = (
+            t("Check for new versions"),
+            t("Once a day OpenSwitch asks GitHub for the number of the latest version. Nothing else is sent, and nothing is downloaded by itself."),
+        );
+        if p.row(ui, &[label, hint, "update", "github"]) {
+            setting_row(ui, label, Some(hint), |ui| {
+                toggle(ui, &mut self.s.check_updates);
+                if self.update_job.is_some() {
+                    ui.spinner();
+                } else if ui.button(t("Check now")).clicked() {
+                    self.update_job = Some(std::thread::spawn(crate::updates::check_now));
+                }
+            });
+            if let Some(job) = self.update_job.take_if(|j| j.is_finished()) {
+                self.update_result = job.join().ok();
+            } else if self.update_job.is_some() {
+                ui.ctx().request_repaint_after(Duration::from_millis(200));
+            }
+            match &self.update_result {
+                Some(crate::updates::Check::Newer(tag)) => {
+                    let text = i18n::f("Version {} is available", &[&tag.trim_start_matches('v')]);
+                    ui.horizontal(|ui| {
+                        ui.colored_label(GREEN, text);
+                        if ui.button(t("Open the download page")).clicked() {
+                            sys::open_url(&openswitch::update::release_page(tag));
+                        }
+                    });
+                }
+                Some(crate::updates::Check::Latest) => {
+                    ui.label(RichText::new(t("You have the latest version")).small().weak());
+                }
+                Some(crate::updates::Check::Failed(e)) => {
+                    ui.colored_label(RED, i18n::f("Could not check: {}", &[e]));
+                }
+                None => {}
+            }
         }
 
         let (label, hint) =

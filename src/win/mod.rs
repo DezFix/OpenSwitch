@@ -44,12 +44,14 @@ mod selection;
 mod sound;
 mod switching;
 mod tray;
+mod update;
 
 use hooks::*;
 use input::*;
 use selection::*;
 use switching::*;
 use tray::*;
+use update::*;
 
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_TOGGLE_AUTO: u32 = WM_APP + 2;
@@ -58,10 +60,15 @@ const WM_FOREGROUND: u32 = WM_APP + 5;
 const WM_LAYOUT_SEEN: u32 = WM_APP + 6;
 const WM_SOUND: u32 = WM_APP + 10;
 const WM_HISTORY: u32 = WM_APP + 12;
+const WM_UPDATE: u32 = WM_APP + 13;
 const TIMER_ICON: usize = 1;
 const TIMER_REHOOK: usize = 2;
 const TIMER_VERIFY: usize = 3;
 const TIMER_WATCH: usize = 4;
+const TIMER_UPDATE: usize = 5;
+/// The first update check runs this long after start-up, then the timer ticks every hour.
+const UPDATE_FIRST_MS: u32 = 60_000;
+const UPDATE_TICK_MS: u32 = 3_600_000;
 /// How often the settings files are checked for edits made outside the settings window.
 const WATCH_MS: u32 = 2000;
 /// How long one WM_SUSPEND request lasts (the settings window repeats it while recording).
@@ -77,6 +84,7 @@ const ID_STARTUP: usize = 101;
 const ID_SETTINGS: usize = 102;
 const ID_ABOUT: usize = 106;
 const ID_EXIT: usize = 107;
+const ID_UPDATE: usize = 108;
 
 /// A layout switch we asked for and still have to confirm.
 struct Pending {
@@ -168,6 +176,7 @@ unsafe fn wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
                     set_auto(!auto);
                 }
                 WM_RBUTTONUP | WM_CONTEXTMENU => show_menu(hwnd),
+                NIN_BALLOONUSERCLICK => open_new_version(),
                 _ => {}
             }
             0
@@ -179,6 +188,10 @@ unsafe fn wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
         }
         WM_RELOAD => {
             reload();
+            0
+        }
+        WM_UPDATE => {
+            update_found(hwnd);
             0
         }
         WM_HISTORY => {
@@ -257,6 +270,10 @@ unsafe fn wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
                             log::warn!("settings.ini: {}", warn.join("; "));
                         }
                     }
+                }
+                TIMER_UPDATE => {
+                    SetTimer(hwnd, TIMER_UPDATE, UPDATE_TICK_MS, None);
+                    maybe_check_update(hwnd);
                 }
                 TIMER_REHOOK => {
                     // Windows silently drops low-level hooks that were slow once; re-install periodically.
@@ -461,6 +478,7 @@ pub fn run() {
         SetTimer(hwnd, TIMER_ICON, 250, None);
         SetTimer(hwnd, TIMER_REHOOK, 60_000, None);
         SetTimer(hwnd, TIMER_WATCH, WATCH_MS, None);
+        SetTimer(hwnd, TIMER_UPDATE, UPDATE_FIRST_MS, None);
 
         if !with_app(|a| a.engine.settings.setup_done).unwrap_or(true) {
             // First run: show the guide (it marks itself done when closed).

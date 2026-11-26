@@ -126,6 +126,21 @@ pub(super) unsafe fn update_tray(app: &mut App, force: bool, add: bool) {
     app.icon = icon;
 }
 
+/// A notification next to the tray icon.
+pub(super) unsafe fn show_balloon(hwnd: HWND, title: &str, text: &str) {
+    let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
+    nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+    nid.hWnd = hwnd;
+    nid.uID = 1;
+    nid.uFlags = NIF_INFO;
+    nid.dwInfoFlags = NIIF_INFO;
+    for (dst, src) in [(&mut nid.szInfoTitle[..], title), (&mut nid.szInfo[..], text)] {
+        let units: Vec<u16> = src.encode_utf16().take(dst.len() - 1).collect();
+        dst[..units.len()].copy_from_slice(&units);
+    }
+    Shell_NotifyIconW(NIM_MODIFY, &nid);
+}
+
 pub(super) unsafe fn remove_tray(hwnd: HWND) {
     let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
     nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
@@ -186,6 +201,9 @@ pub(super) unsafe fn show_menu(hwnd: HWND) {
         item(ID_STARTUP, t("Start with Windows"), sys::startup_enabled());
     }
     item(ID_ABOUT, t("About"), false);
+    if let Some(tag) = newer_version() {
+        item(ID_UPDATE, &i18n::f("Download OpenSwitch {}…", &[&tag.trim_start_matches('v')]), false);
+    }
     AppendMenuW(m, MF_SEPARATOR, 0, null());
     item(ID_EXIT, t("Exit"), false);
 
@@ -204,6 +222,7 @@ pub(super) unsafe fn show_menu(hwnd: HWND) {
                 sys::set_startup(!sys::startup_enabled());
             }
         }
+        ID_UPDATE => open_new_version(),
         ID_ABOUT => {
             let s = with_app(|a| a.engine.settings.clone()).unwrap_or_default();
             let double_shift = if s.double_shift { t("Shift Shift (double press) — the same\n") } else { "" };

@@ -75,7 +75,7 @@ impl SetupApp {
         ui.add_space(14.0);
         ui.label(RichText::new(t("Your privacy")).strong());
         for line in [
-            t("• Works offline: nothing is ever sent anywhere."),
+            t("• Works offline: what you type never leaves the computer. The only request to the internet is the optional update check below."),
             t("• What you type is never saved or written to the log."),
             t("• No AI: only dictionaries and simple rules, right on your computer."),
             t("• Free and open source (GNU GPL)."),
@@ -157,6 +157,9 @@ impl SetupApp {
             }
         }
         ui.add_space(10.0);
+        setting_row(ui, t("Check for new versions"), Some(t("Once a day OpenSwitch asks GitHub for the number of the latest version. Nothing else is sent, and nothing is downloaded by itself.")), |ui| {
+            toggle(ui, &mut self.s.check_updates)
+        });
         // With "run as administrator" the task starts it; a Run key would start a second copy.
         if !self.s.run_as_admin {
             setting_row(ui, t("Start OpenSwitch with Windows"), None, |ui| {
