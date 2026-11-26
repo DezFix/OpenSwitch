@@ -60,6 +60,8 @@ pub enum Action {
 pub struct Output {
     pub swallow: bool,
     pub actions: Vec<Action>,
+    /// The actions are an automatic fix (for the optional sound).
+    pub auto_fix: bool,
 }
 
 impl Output {
@@ -350,14 +352,14 @@ impl Engine {
         let hotkeys = s.module_layout;
         if hotkeys && s.hotkey_convert_word.matches(vk, ctrl, alt, shift, win) {
             let lang = self.effective_lang(layout, now);
-            return Output { swallow: true, actions: self.convert_word(lang, now) };
+            return Output { swallow: true, actions: self.convert_word(lang, now), auto_fix: false };
         }
         if hotkeys && s.hotkey_convert_selection.matches(vk, ctrl, alt, shift, win) {
             self.word = None;
-            return Output { swallow: true, actions: vec![Action::ConvertSelection] };
+            return Output { swallow: true, actions: vec![Action::ConvertSelection], auto_fix: false };
         }
         if hotkeys && s.hotkey_toggle_auto.matches(vk, ctrl, alt, shift, win) {
-            return Output { swallow: true, actions: vec![Action::ToggleAuto] };
+            return Output { swallow: true, actions: vec![Action::ToggleAuto], auto_fix: false };
         }
         if ctrl || alt || win {
             self.word = None;
@@ -371,7 +373,7 @@ impl Engine {
         if vk == VK_BACK {
             if self.settings.undo_backspace {
                 if let Some(actions) = self.undo_auto(now) {
-                    return Output { swallow: true, actions };
+                    return Output { swallow: true, actions, auto_fix: false };
                 }
             }
             if self.word.is_none() {
@@ -516,7 +518,7 @@ impl Engine {
                 w.trailing = if vk == VK_SPACE { 1 } else { 0 };
                 self.prev_lang = Some(to);
                 self.sentence_start = ends_sentence(&self.detector.layouts.render(&w.keys, to));
-                return Output { swallow: true, actions };
+                return Output { swallow: true, actions, auto_fix: true };
             }
         }
         let mut out = Output::pass();
@@ -572,7 +574,11 @@ impl Engine {
         }
         self.word = None;
         self.sentence_start = SENTENCE_END.contains(&c);
-        Some(Output { swallow: true, actions: vec![Action::Backspace(spaces), Action::Type(c.to_string())] })
+        Some(Output {
+            swallow: true,
+            actions: vec![Action::Backspace(spaces), Action::Type(c.to_string())],
+            auto_fix: true,
+        })
     }
 
     /// Backspace right after an automatic fix (word + the space that triggered it): put the
@@ -1044,6 +1050,7 @@ mod tests {
         typ(&mut e, "првиет", Lang::Ru, &mut t);
         let o = space(&mut e, Lang::Ru, &mut t);
         assert_eq!(o.actions, vec![Action::Backspace(6), Action::Type("привет".into()), Action::Tap(VK_SPACE)]);
+        assert!(o.auto_fix);
         // undo with Backspace; twice -> left alone for good
         let o = e.on_key(VK_BACK, true, t + 10, Some(Lang::Ru), true);
         assert_eq!(o.actions[1], Action::Type("првиет".into()));

@@ -177,6 +177,8 @@ pub struct Settings {
     pub learn_manual: bool,
     /// Capital letter at the start of a sentence, English "i" -> "I".
     pub capitalize: bool,
+    /// A short quiet click after an automatic fix.
+    pub sound: bool,
     /// Remove the space typed before , . ! ? ("привет , как" -> "привет, как").
     pub fix_space: bool,
     pub sensitivity: f32,
@@ -213,6 +215,7 @@ impl Default for Settings {
             learn_manual: true,
             capitalize: true,
             fix_space: true,
+            sound: false,
             sensitivity: 1.0,
             hotkey_convert_word: Hotkey { vk: VK_PAUSE, ..Hotkey::NONE },
             hotkey_convert_selection: Hotkey { vk: VK_PAUSE, shift: true, ..Hotkey::NONE },
@@ -327,6 +330,9 @@ capitalize = true
 # Убирать пробел перед знаком препинания: «привет , как» -> «привет, как»
 fix_space = true
 
+# Тихий щелчок после автоматического исправления
+sound = false
+
 # Чувствительность автопереключения: 0.5 (осторожно) ... 2.0 (агрессивно)
 sensitivity = 1.0
 
@@ -394,6 +400,7 @@ impl Settings {
                 "learn_manual" => parse_bool(v).map(|b| s.learn_manual = b).is_some(),
                 "capitalize" => parse_bool(v).map(|b| s.capitalize = b).is_some(),
                 "fix_space" => parse_bool(v).map(|b| s.fix_space = b).is_some(),
+                "sound" => parse_bool(v).map(|b| s.sound = b).is_some(),
                 "sensitivity" => v.parse::<f32>().ok().filter(|x| *x > 0.0).map(|x| s.sensitivity = x).is_some(),
                 "language" => {
                     let code = v.to_ascii_lowercase();
@@ -463,6 +470,7 @@ impl Settings {
             ("learn_manual", b(self.learn_manual).to_string()),
             ("capitalize", b(self.capitalize).to_string()),
             ("fix_space", b(self.fix_space).to_string()),
+            ("sound", b(self.sound).to_string()),
             ("sensitivity", format!("{:.2}", self.sensitivity)),
             ("language", self.language.clone()),
             ("theme", self.theme.clone()),
@@ -596,6 +604,7 @@ mod tests {
             skip_passwords: false,
             run_as_admin: true,
             theme: "dark".into(),
+            sound: true,
             sensitivity: 1.5,
             hotkey_convert_word: Hotkey::parse("Ctrl+Shift+F12").unwrap(),
             hotkey_toggle_auto: Hotkey::NONE,
@@ -608,6 +617,7 @@ mod tests {
         assert!(!p.skip_passwords);
         assert!(p.run_as_admin && !d.run_as_admin);
         assert_eq!((p.theme.as_str(), s.theme.as_str()), ("dark", "system"));
+        assert!(p.sound && !s.sound);
         assert_eq!(Settings::parse("theme = blue").1.len(), 1);
         assert!(d.skip_passwords && s.skip_passwords);
         assert_eq!(p.sensitivity, 1.5);

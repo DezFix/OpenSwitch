@@ -39,6 +39,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 mod hooks;
 mod input;
 mod selection;
+mod sound;
 mod switching;
 mod tray;
 
@@ -53,6 +54,7 @@ const WM_TOGGLE_AUTO: u32 = WM_APP + 2;
 const WM_SWITCH_LAYOUT: u32 = WM_APP + 4;
 const WM_FOREGROUND: u32 = WM_APP + 5;
 const WM_LAYOUT_SEEN: u32 = WM_APP + 6;
+const WM_SOUND: u32 = WM_APP + 10;
 const TIMER_ICON: usize = 1;
 const TIMER_REHOOK: usize = 2;
 const TIMER_VERIFY: usize = 3;
@@ -165,6 +167,10 @@ unsafe fn wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
         }
         WM_RELOAD => {
             reload();
+            0
+        }
+        WM_SOUND => {
+            sound::click();
             0
         }
         WM_QUIT_APP => {

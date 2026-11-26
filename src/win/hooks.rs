@@ -176,7 +176,11 @@ pub(super) fn handle_key(vk: u8, down: bool) -> bool {
         }
         let checking = skip && matches!(app.password, Password::Checking(_, until) if now < until);
         let auto_allowed = app.fg_known && !app.fg_excluded && !checking;
-        Some((app.engine.on_key(vk, down, now, layout, auto_allowed), app.hwnd))
+        let out = app.engine.on_key(vk, down, now, layout, auto_allowed);
+        if out.auto_fix && app.engine.settings.sound {
+            unsafe { PostMessageW(app.hwnd, WM_SOUND, 0, 0) };
+        }
+        Some((out, app.hwnd))
     });
     let Some(Some((out, hwnd))) = result else { return false };
     perform(out.actions, hwnd);

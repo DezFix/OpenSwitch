@@ -407,6 +407,11 @@ impl SettingsApp {
             setting_row(ui, label, Some(hint), |ui| toggle(ui, &mut self.s.undo_backspace));
         }
 
+        let (label, hint) = (t("Sound when a word is fixed"), t("A short quiet click after an automatic fix"));
+        if p.row(ui, &[label, hint, "sound"]) {
+            setting_row(ui, label, Some(hint), |ui| toggle(ui, &mut self.s.sound));
+        }
+
         let (label, hint) = (t("Try it here"), t("Type «ghbdtn» and a space, it should become «привет»"));
         if p.row(ui, &[label, hint]) {
             ui.add_space(6.0);
