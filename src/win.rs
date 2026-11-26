@@ -13,6 +13,7 @@ use std::ffi::c_void;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+use std::sync::mpsc::Sender;
 use std::time::Instant;
 
 use openswitch::detect::Detector;
@@ -21,6 +22,7 @@ use openswitch::i18n::{self, t};
 use openswitch::layout::{Lang, Layouts};
 
 use crate::clipboard;
+use crate::password::{self, WM_PASSWORD};
 use crate::sys::{self, w, APP_NAME, OUR_MARK, WINDOW_CLASS, WM_RELOAD, WM_SUSPEND};
 
 use windows_sys::Win32::Foundation::*;
@@ -49,6 +51,8 @@ const SUSPEND_MS: u64 = 3000;
 const VERIFY_MS: u32 = 300;
 /// A hook call slower than this is logged (Windows' own limit is around 300-1000 ms).
 const SLOW_HOOK_MS: u128 = 30;
+/// How long automatic fixes wait for the password check of a newly focused field.
+const PASSWORD_WAIT_MS: u64 = 500;
 
 const ID_AUTO: usize = 100;
 const ID_STARTUP: usize = 101;
@@ -64,6 +68,15 @@ struct Pending {
     presses: u32,
     /// Layout seen before the last press.
     before: Option<Lang>,
+}
+
+/// Is the focused field a password field?
+#[derive(Clone, Copy, PartialEq)]
+enum Password {
+    No,
+    Yes,
+    /// Asked the worker thread (request number, give up at this tick).
+    Checking(usize, u64),
 }
 
 struct App {
@@ -91,6 +104,12 @@ struct App {
     suspended_until: u64,
     /// Modification times of settings.ini / exceptions.txt when they were last read.
     files_stamp: [Option<std::time::SystemTime>; 3],
+    password: Password,
+    /// Number of the last focus event (to drop late answers of the worker).
+    password_seq: usize,
+    /// Top-level window of the last focus event.
+    password_root: HWND,
+    password_tx: Option<Sender<password::Query>>,
 }
 
 thread_local! {
@@ -371,6 +390,49 @@ unsafe extern "system" fn foreground_event(
     let _ = catch_unwind(|| set_foreground(hwnd));
 }
 
+/// WinEvent callback (runs on our message loop): keyboard focus moved to another control.
+unsafe extern "system" fn focus_event(
+    _hook: HWINEVENTHOOK,
+    _event: u32,
+    hwnd: HWND,
+    id_object: i32,
+    id_child: i32,
+    _thread: u32,
+    _time: u32,
+) {
+    let _ = catch_unwind(|| on_focus(hwnd, id_object, id_child));
+}
+
+/// Find out whether the newly focused control is a password field: Win32 edits right here,
+/// everything else on the worker thread (the answer comes as `WM_PASSWORD`).
+fn on_focus(hwnd: HWND, id_object: i32, id_child: i32) {
+    if hwnd.is_null() || !with_app(|a| a.engine.settings.skip_passwords).unwrap_or(false) {
+        return;
+    }
+    let quick =
+        if id_object == OBJID_CLIENT && id_child == CHILDID_SELF as i32 { password::win32_edit(hwnd) } else { None };
+    let root = unsafe { GetAncestor(hwnd, GA_ROOT) };
+    let now = unsafe { GetTickCount64() };
+    with_app(|app| {
+        app.password_seq += 1;
+        app.password_root = root;
+        app.password = match quick {
+            Some(true) => Password::Yes,
+            Some(false) => Password::No,
+            None => {
+                let q = password::Query { seq: app.password_seq, hwnd, id_object, id_child };
+                match &app.password_tx {
+                    Some(tx) if tx.send(q).is_ok() => Password::Checking(app.password_seq, now + PASSWORD_WAIT_MS),
+                    _ => Password::No,
+                }
+            }
+        };
+        if app.password == Password::Yes {
+            app.engine.reset();
+        }
+    });
+}
+
 /// Remember the new foreground window and resolve its program name. Called from the
 /// WinEvent hook and from `WM_FOREGROUND` (never from inside the keyboard hook: opening
 /// another process can be slow).
@@ -380,6 +442,14 @@ fn set_foreground(fg: HWND) {
         if fg != app.last_fg {
             app.last_fg = fg;
             app.engine.reset();
+            if app.password_root != fg {
+                // No focus event from this window yet: the style of its focused control
+                // is all we know (the focus event usually follows right away).
+                let pw =
+                    app.engine.settings.skip_passwords && password::win32_edit(sys::focus_target(fg).0) == Some(true);
+                app.password = if pw { Password::Yes } else { Password::No };
+                app.password_root = fg;
+            }
         }
         app.fg_excluded = exe.as_ref().is_some_and(|n| app.engine.settings.exclude.contains(n));
         app.fg_exe = exe;
@@ -427,7 +497,18 @@ fn handle_key(vk: u8, down: bool) -> bool {
                 [is_down(VK_LWIN), is_down(VK_RWIN)],
             );
         }
-        let auto_allowed = app.fg_known && !app.fg_excluded;
+        let skip = app.engine.settings.skip_passwords;
+        if skip && app.password == Password::Yes {
+            // Password field: fix nothing, keep nothing typed; only "toggle auto" works.
+            app.engine.reset();
+            let mut out = app.engine.on_key(vk, down, now, layout, false);
+            app.engine.reset();
+            out.actions.retain(|a| matches!(a, Action::ToggleAuto));
+            out.swallow &= !out.actions.is_empty();
+            return Some((out, app.hwnd));
+        }
+        let checking = skip && matches!(app.password, Password::Checking(_, until) if now < until);
+        let auto_allowed = app.fg_known && !app.fg_excluded && !checking;
         Some((app.engine.on_key(vk, down, now, layout, auto_allowed), app.hwnd))
     });
     let Some(Some((out, hwnd))) = result else { return false };
@@ -859,6 +940,17 @@ unsafe fn wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
             init_layouts();
             0
         }
+        WM_PASSWORD => {
+            with_app(|app| {
+                if matches!(app.password, Password::Checking(seq, _) if seq == wparam) {
+                    app.password = if lparam != 0 { Password::Yes } else { Password::No };
+                    if lparam != 0 {
+                        app.engine.reset();
+                    }
+                }
+            });
+            0
+        }
         WM_FOREGROUND => {
             // Posted by the keyboard hook; ignore it if the user has switched again since.
             let fg = wparam as HWND;
@@ -984,6 +1076,10 @@ pub fn run() {
                 unreliable_apps: HashSet::new(),
                 suspended_until: 0,
                 files_stamp: sys::files_stamp(),
+                password: Password::No,
+                password_seq: 0,
+                password_root: null_mut(),
+                password_tx: Some(password::spawn_worker(hwnd)),
             })
         });
         with_app(|app| update_tray(app, true, true));
@@ -1001,6 +1097,19 @@ pub fn run() {
         );
         if fg_hook.is_null() {
             log::warn!("SetWinEventHook failed: {}", GetLastError());
+        }
+        // Focus changes inside windows: to notice password fields.
+        let focus_hook = SetWinEventHook(
+            EVENT_OBJECT_FOCUS,
+            EVENT_OBJECT_FOCUS,
+            null_mut(),
+            Some(focus_event),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+        );
+        if focus_hook.is_null() {
+            log::warn!("SetWinEventHook(focus) failed: {}", GetLastError());
         }
         install_hooks();
         if KB_HOOK.load(Ordering::SeqCst).is_null() {
@@ -1030,6 +1139,9 @@ pub fn run() {
         remove_hooks();
         if !fg_hook.is_null() {
             UnhookWinEvent(fg_hook);
+        }
+        if !focus_hook.is_null() {
+            UnhookWinEvent(focus_hook);
         }
         log::info!("exit");
         with_app(|app| {

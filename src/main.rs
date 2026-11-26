@@ -12,6 +12,8 @@ mod clipboard;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod logging;
 #[cfg(windows)]
+mod password;
+#[cfg(windows)]
 mod setup;
 #[cfg(windows)]
 mod sys;

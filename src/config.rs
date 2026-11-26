@@ -166,6 +166,8 @@ pub struct Settings {
     pub fix_caps: bool,
     /// Leave links, e-mail addresses, file names and camelCase identifiers alone.
     pub skip_code: bool,
+    /// Do nothing while the user types in a password field.
+    pub skip_passwords: bool,
     /// Be more careful with the first word after the user switched the layout themselves.
     pub careful_after_switch: bool,
     /// Remember words fixed by hand (Pause / Shift Shift) and fix them automatically next time.
@@ -200,6 +202,7 @@ impl Default for Settings {
             undo_backspace: true,
             fix_caps: true,
             skip_code: true,
+            skip_passwords: true,
             careful_after_switch: true,
             learn_manual: true,
             capitalize: true,
@@ -262,6 +265,9 @@ fix_caps = true
 
 # Не трогать ссылки, почту, имена файлов и идентификаторы вида camelCase
 skip_code = true
+
+# Ничего не делать в полях пароля (пароль не исправляется и не запоминается)
+skip_passwords = true
 
 # Осторожнее с первым словом после того, как вы сами переключили раскладку
 careful_after_switch = true
@@ -333,6 +339,7 @@ impl Settings {
                 "undo_backspace" => parse_bool(v).map(|b| s.undo_backspace = b).is_some(),
                 "fix_caps" => parse_bool(v).map(|b| s.fix_caps = b).is_some(),
                 "skip_code" => parse_bool(v).map(|b| s.skip_code = b).is_some(),
+                "skip_passwords" => parse_bool(v).map(|b| s.skip_passwords = b).is_some(),
                 "careful_after_switch" => parse_bool(v).map(|b| s.careful_after_switch = b).is_some(),
                 "learn_manual" => parse_bool(v).map(|b| s.learn_manual = b).is_some(),
                 "capitalize" => parse_bool(v).map(|b| s.capitalize = b).is_some(),
@@ -391,6 +398,7 @@ impl Settings {
             ("undo_backspace", b(self.undo_backspace).to_string()),
             ("fix_caps", b(self.fix_caps).to_string()),
             ("skip_code", b(self.skip_code).to_string()),
+            ("skip_passwords", b(self.skip_passwords).to_string()),
             ("careful_after_switch", b(self.careful_after_switch).to_string()),
             ("learn_manual", b(self.learn_manual).to_string()),
             ("capitalize", b(self.capitalize).to_string()),
@@ -512,6 +520,7 @@ mod tests {
 
         let m = Settings {
             auto_switch: false,
+            skip_passwords: false,
             sensitivity: 1.5,
             hotkey_convert_word: Hotkey::parse("Ctrl+Shift+F12").unwrap(),
             hotkey_toggle_auto: Hotkey::NONE,
@@ -521,6 +530,8 @@ mod tests {
         let (p, w) = Settings::parse(&m.to_text());
         assert!(w.is_empty(), "{w:?}");
         assert!(!p.auto_switch);
+        assert!(!p.skip_passwords);
+        assert!(d.skip_passwords && s.skip_passwords);
         assert_eq!(p.sensitivity, 1.5);
         assert_eq!(p.hotkey_convert_word, m.hotkey_convert_word);
         assert_eq!(p.hotkey_toggle_auto, Hotkey::NONE);

@@ -563,6 +563,14 @@ impl SettingsApp {
 
     fn programs(&mut self, ui: &mut egui::Ui, p: &mut Page) {
         p.begin(Section::Programs);
+        let (label, hint) = (
+            t("Do nothing in password fields"),
+            t("Nothing is fixed or remembered while you type a password (also in browsers)"),
+        );
+        if p.row(ui, &[label, hint]) {
+            setting_row(ui, label, Some(hint), |ui| toggle(ui, &mut self.s.skip_passwords));
+            ui.add_space(6.0);
+        }
         let mut list: Vec<String> = self.s.exclude.iter().cloned().collect();
         list.sort();
         let label = t("Programs without auto switching");

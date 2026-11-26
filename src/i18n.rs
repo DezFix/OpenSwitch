@@ -144,6 +144,11 @@ const RU: &[(&str, &str)] = &[
     ("Fix selected text", "Исправить выделенный текст"),
     ("Enable/disable auto switching", "Вкл/выкл автопереключение"),
     ("Restore default keys", "Вернуть клавиши по умолчанию"),
+    ("Do nothing in password fields", "Ничего не делать в полях пароля"),
+    (
+        "Nothing is fixed or remembered while you type a password (also in browsers)",
+        "Пока вы вводите пароль, ничего не исправляется и не запоминается (и в браузерах тоже)",
+    ),
     ("Programs without auto switching", "Программы без автопереключения"),
     (
         "Words are not fixed automatically in these programs, but hotkeys work. Handy for terminals, code editors and games.",
@@ -323,6 +328,11 @@ const UK: &[(&str, &str)] = &[
     ("Fix selected text", "Виправити виділений текст"),
     ("Enable/disable auto switching", "Увімк./вимк. автоперемикання"),
     ("Restore default keys", "Повернути клавіші типовими"),
+    ("Do nothing in password fields", "Нічого не робити в полях пароля"),
+    (
+        "Nothing is fixed or remembered while you type a password (also in browsers)",
+        "Поки ви вводите пароль, нічого не виправляється і не запам'ятовується (і в браузерах теж)",
+    ),
     ("Programs without auto switching", "Програми без автоперемикання"),
     (
         "Words are not fixed automatically in these programs, but hotkeys work. Handy for terminals, code editors and games.",
