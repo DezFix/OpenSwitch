@@ -26,6 +26,8 @@ pub const WM_RELOAD: u32 = WM_APP + 3;
 pub const WM_SUSPEND: u32 = WM_APP + 7;
 /// Message asking the tray app to quit (to restart it with other rights).
 pub const WM_QUIT_APP: u32 = WM_APP + 9;
+/// Message asking the tray app to forget the recent fixes.
+pub const WM_HISTORY_CLEAR: u32 = WM_APP + 11;
 /// Marker in dwExtraInfo of every event we inject.
 pub const OUR_MARK: usize = 0x0F_E7_C0_DE;
 
@@ -289,6 +291,14 @@ pub fn quit_tray() {
             }
             std::thread::sleep(std::time::Duration::from_millis(300));
         }
+    }
+}
+
+/// Ask the tray app to forget the recent fixes.
+pub fn clear_history() {
+    let h = tray_window();
+    if !h.is_null() {
+        unsafe { PostMessageW(h, WM_HISTORY_CLEAR, 0, 0) };
     }
 }
 

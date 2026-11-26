@@ -8,7 +8,7 @@
 //! happens on the message loop after the hook returned, or on a worker thread.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::c_void;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr::{null, null_mut};
@@ -18,14 +18,15 @@ use std::time::Instant;
 
 use openswitch::config::AppRule;
 use openswitch::detect::Detector;
-use openswitch::engine::{Action, Engine};
+use openswitch::engine::{Action, Engine, Fix};
 use openswitch::i18n::{self, t};
 use openswitch::layout::{Lang, Layouts};
 
 use crate::admin;
 use crate::clipboard;
+use crate::history;
 use crate::password::{self, WM_PASSWORD};
-use crate::sys::{self, w, APP_NAME, OUR_MARK, WINDOW_CLASS, WM_QUIT_APP, WM_RELOAD, WM_SUSPEND};
+use crate::sys::{self, w, APP_NAME, OUR_MARK, WINDOW_CLASS, WM_HISTORY_CLEAR, WM_QUIT_APP, WM_RELOAD, WM_SUSPEND};
 
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
@@ -56,6 +57,7 @@ const WM_SWITCH_LAYOUT: u32 = WM_APP + 4;
 const WM_FOREGROUND: u32 = WM_APP + 5;
 const WM_LAYOUT_SEEN: u32 = WM_APP + 6;
 const WM_SOUND: u32 = WM_APP + 10;
+const WM_HISTORY: u32 = WM_APP + 12;
 const TIMER_ICON: usize = 1;
 const TIMER_REHOOK: usize = 2;
 const TIMER_VERIFY: usize = 3;
@@ -107,6 +109,9 @@ struct App {
     rules_exe: Option<String>,
     /// Layout each "remember the layout" program had when the user left it.
     remembered: HashMap<String, Lang>,
+    /// The last automatic fixes (memory only) and the shared block the settings window reads.
+    history: VecDeque<Fix>,
+    history_map: Option<history::Writer>,
     /// False between a foreground change seen by the hook and the program name lookup.
     fg_known: bool,
     /// What the tray icon shows: layout code (EN/RU/UA/...), its side, auto switching on/off.
@@ -174,6 +179,23 @@ unsafe fn wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
         }
         WM_RELOAD => {
             reload();
+            0
+        }
+        WM_HISTORY => {
+            with_app(|app| {
+                if let Some(map) = &app.history_map {
+                    map.write(&app.history);
+                }
+            });
+            0
+        }
+        WM_HISTORY_CLEAR => {
+            with_app(|app| {
+                app.history.clear();
+                if let Some(map) = &app.history_map {
+                    map.write(&app.history);
+                }
+            });
             0
         }
         WM_SOUND => {
@@ -367,7 +389,7 @@ pub fn run() {
         let taskbar_created = RegisterWindowMessageW(w("TaskbarCreated").as_ptr());
         // With administrator rights Windows drops messages from normal programs (the shell,
         // our settings window started by hand): let ours through.
-        for m in [WM_TRAY, WM_RELOAD, WM_SUSPEND, WM_QUIT_APP, taskbar_created] {
+        for m in [WM_TRAY, WM_RELOAD, WM_SUSPEND, WM_QUIT_APP, WM_HISTORY_CLEAR, taskbar_created] {
             ChangeWindowMessageFilterEx(hwnd, m, MSGFLT_ALLOW, null_mut());
         }
 
@@ -381,6 +403,8 @@ pub fn run() {
                 rules_fg: null_mut(),
                 rules_exe: None,
                 remembered: HashMap::new(),
+                history: VecDeque::new(),
+                history_map: history::Writer::create(),
                 fg_known: false,
                 icon_state: None,
                 hkl: Vec::new(),

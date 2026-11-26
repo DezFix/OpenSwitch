@@ -158,6 +158,9 @@ struct SettingsApp {
     tray_checked: Instant,
     /// The theme the window shows now.
     theme_shown: String,
+    /// The tray app's recent fixes and when they were read.
+    recent: Vec<openswitch::engine::Fix>,
+    recent_read: Instant,
     /// "Run as administrator" being turned on/off on a worker thread (the wanted state).
     admin_job: Option<(bool, std::thread::JoinHandle<Result<(), Failure>>)>,
 }
@@ -195,6 +198,8 @@ impl SettingsApp {
             tray_running: !sys::tray_window().is_null(),
             tray_checked: Instant::now(),
             theme_shown: String::new(),
+            recent: crate::history::read(),
+            recent_read: Instant::now(),
             admin_job: None,
         }
     }
@@ -730,6 +735,7 @@ impl SettingsApp {
         if p.row(ui, &[label, hint]) {
             setting_row(ui, label, Some(hint), |ui| toggle(ui, &mut self.s.learn_manual));
         }
+        self.recent_fixes(ui, p);
         word_list(
             ui,
             p,
@@ -752,6 +758,52 @@ impl SettingsApp {
             &mut self.always,
             &mut self.new_always,
         );
+    }
+
+    fn recent_fixes(&mut self, ui: &mut egui::Ui, p: &mut Page) {
+        let label = t("Recent fixes");
+        let hint = t("Kept only in memory while OpenSwitch runs, never written to disk.");
+        let mut texts = vec![label, hint, "history"];
+        texts.extend(self.recent.iter().flat_map(|f| [f.before.as_str(), f.after.as_str()]));
+        if !p.row(ui, &texts) {
+            return;
+        }
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(label);
+            if !self.recent.is_empty() && ui.small_button(t("Clear")).clicked() {
+                sys::clear_history();
+                self.recent.clear();
+            }
+        });
+        ui.label(RichText::new(hint).small().weak());
+        ui.add_space(4.0);
+        let mut never: Option<String> = None;
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            if self.recent.is_empty() {
+                ui.label(RichText::new(t("No fixes yet")).weak());
+            }
+            egui::Grid::new("recent").num_columns(2).spacing([16.0, 4.0]).show(ui, |ui| {
+                for f in &self.recent {
+                    ui.label(format!("{}  →  {}", f.before, f.after));
+                    if self.words.contains(&f.typed) {
+                        ui.label(RichText::new(t("✓ never fixed")).small().weak());
+                    } else if ui.small_button(t("Never fix")).clicked() {
+                        never = Some(f.typed.clone());
+                    }
+                    ui.end_row();
+                }
+            });
+        });
+        if let Some(word) = never {
+            // An exception, and no longer a learned word.
+            self.always.retain(|l| l.split_whitespace().next() != Some(word.as_str()));
+            self.words.push(word);
+            self.words.sort();
+            self.words.dedup();
+        }
+        ui.add_space(6.0);
     }
 
     fn about(&mut self, ui: &mut egui::Ui, p: &mut Page) {
@@ -968,6 +1020,10 @@ impl eframe::App for SettingsApp {
         if self.theme_shown != self.s.theme {
             apply_theme(&ctx, &self.s.theme);
             self.theme_shown = self.s.theme.clone();
+        }
+        if self.recent_read.elapsed() > Duration::from_secs(1) {
+            self.recent_read = Instant::now();
+            self.recent = crate::history::read();
         }
         self.poll_recording(&ctx);
         self.poll_admin(&ctx);

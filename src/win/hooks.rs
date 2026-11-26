@@ -213,9 +213,13 @@ pub(super) fn handle_key(vk: u8, down: bool) -> bool {
         }
         let checking = skip && matches!(app.password, Password::Checking(_, until) if now < until);
         let auto_allowed = app.fg_known && app.fg_rule != AppRule::Manual && !checking;
-        let out = app.engine.on_key(vk, down, now, layout, auto_allowed);
+        let mut out = app.engine.on_key(vk, down, now, layout, auto_allowed);
         if out.auto_fix && app.engine.settings.sound {
             unsafe { PostMessageW(app.hwnd, WM_SOUND, 0, 0) };
+        }
+        if let Some(fix) = out.fixed.take() {
+            history::push(&mut app.history, fix);
+            unsafe { PostMessageW(app.hwnd, WM_HISTORY, 0, 0) };
         }
         Some((out, app.hwnd))
     });

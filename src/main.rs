@@ -11,6 +11,8 @@
 mod admin;
 #[cfg(windows)]
 mod clipboard;
+#[cfg(windows)]
+mod history;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod logging;
 #[cfg(windows)]
