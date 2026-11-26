@@ -249,6 +249,16 @@ impl Detector {
         }
     }
 
+    /// A detector whose dictionaries hold only the `n` most frequent words of each language
+    /// (for the evaluation: rarer words then act as correct words missing from the dictionary).
+    pub fn limited(n: usize) -> Self {
+        let d = Self::new();
+        for (i, lang) in [Language::En, Language::Ru, Language::Uk].into_iter().enumerate() {
+            let _ = d.models[i].set(LangModel::limited(lang, n));
+        }
+        d
+    }
+
     /// The dictionary and character model of a language (loaded on first use).
     pub fn model(&self, lang: Language) -> &LangModel {
         let i = match lang {

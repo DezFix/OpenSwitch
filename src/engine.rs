@@ -108,6 +108,48 @@ fn spell(d: &Detector, text: &str, lang: Lang) -> Option<Vec<KeyStroke>> {
     d.layouts.keys_for_text(&fixed, lang)
 }
 
+/// How much better the fixed word must look in its language than the word as typed looks in
+/// the layout it was typed in (character model, average log-probability per letter). Chosen
+/// with `examples/eval_typo_layout.rs`.
+pub const OTHER_LAYOUT_GAIN: f32 = 1.0;
+
+/// A typo in a word typed in the wrong layout: `ghdbtn` is «првиет» in Russian, one swap from
+/// «привет». Only when the word as typed is no known word of its own layout, it is a clear
+/// typo (the spelling module is sure) in exactly one other layout, and the fixed word looks
+/// much more like its language than the typed one looks like its own. Only between Latin
+/// and Cyrillic layouts. Returns the layout and the keys of the fixed word.
+pub fn spell_other_layout(d: &Detector, keys: &[KeyStroke], from: Lang, gain: f32) -> Option<(Lang, Vec<KeyStroke>)> {
+    let shown = d.layouts.render(keys, from);
+    let from_langs = d.layouts.languages(from);
+    let mut from_score = f32::MIN;
+    for &l in from_langs {
+        let m = d.model(l);
+        let w = m.clean(&shown)?;
+        if m.rank(&w).is_some() {
+            return None; // a word as typed
+        }
+        from_score = from_score.max(m.score(&w));
+    }
+    let mut found = None;
+    for to in d.layouts.all() {
+        let Some(layout) = d.layouts.get(to) else { continue };
+        if to == from || !layout.target || d.layouts.is_latin(to) == d.layouts.is_latin(from) {
+            continue;
+        }
+        let Some(fixed) = spell(d, &d.layouts.render(keys, to), to) else { continue };
+        let main = d.model(*d.layouts.languages(to).first()?);
+        let fixed_score = main.clean(&d.layouts.render(&fixed, to)).map_or(f32::MIN, |w| main.score(&w));
+        if fixed_score - from_score < gain {
+            continue;
+        }
+        if found.is_some() {
+            return None; // a typo in two layouts: unclear
+        }
+        found = Some((to, fixed));
+    }
+    found
+}
+
 pub struct Engine {
     pub detector: Detector,
     pub settings: Settings,
@@ -410,21 +452,40 @@ impl Engine {
             let from = w.shown_lang;
             let care = if w.after_switch { CAREFUL } else { 1.0 };
             let verdict = if auto_on { Some(self.detector.check_careful(&w.keys, from, care)) } else { None };
-            let switch = verdict.as_ref().is_some_and(|v| v.switch);
-            let to = verdict.filter(|v| v.switch).map_or(from, |v| v.to);
+            let mut switch = verdict.as_ref().is_some_and(|v| v.switch);
+            let mut to = verdict.filter(|v| v.switch).map_or(from, |v| v.to);
+            // A typo in a word the detector did not know because of it: `ghdbtn` -> «привет».
+            let mut other_fix = None;
+            if !switch
+                && auto_on
+                && spell_on
+                && !w.after_switch
+                && !self.detector.never_switch.contains(&self.detector.layouts.render(&w.keys, from).to_lowercase())
+            {
+                if let Some((l, k)) = spell_other_layout(&self.detector, &w.keys, from, OTHER_LAYOUT_GAIN) {
+                    switch = true;
+                    to = l;
+                    other_fix = Some(k);
+                }
+            }
             let caps_fix = caps_on && caps_accident(&w.keys, self.detector.layouts.map(to));
             let n = self.detector.layouts.render(&w.keys, from).chars().count();
             let mut keys = if caps_fix { without_caps(&w.keys) } else { w.keys.clone() };
             let typed = self.detector.layouts.render(&w.keys, w.typed_lang).to_lowercase();
-            let spelled = spell_on
-                && !self.detector.never_switch.contains(&typed)
-                && match spell(&self.detector, &self.detector.layouts.render(&keys, to), to) {
-                    Some(fixed) => {
-                        keys = fixed;
-                        true
+            let spelled = if let Some(k) = other_fix {
+                keys = k;
+                true
+            } else {
+                spell_on
+                    && !self.detector.never_switch.contains(&typed)
+                    && match spell(&self.detector, &self.detector.layouts.render(&keys, to), to) {
+                        Some(fixed) => {
+                            keys = fixed;
+                            true
+                        }
+                        None => false,
                     }
-                    None => false,
-                };
+            };
             let capital = capital_on
                 && needs_capital(
                     &self.detector.layouts.render(&keys, to),
@@ -995,9 +1056,34 @@ mod tests {
         e.reset();
         typ(&mut e, "првиет", Lang::Ru, &mut t);
         assert!(!space(&mut e, Lang::Ru, &mut t).swallow);
-        // A wrong layout and a typo at once («првиет» in English keys) is not recognised yet:
-        // the layout detector does not know the word, so it is left as typed.
+    }
+
+    #[test]
+    fn typo_in_wrong_layout() {
+        // «првиет» typed with English keys: the detector does not know it, spelling does.
+        let mut t = 0;
         let mut e = Engine::new(Detector::new(), Settings { module_spelling: true, ..Settings::default() });
+        typ(&mut e, "ghdbtn", Lang::En, &mut t);
+        let o = space(&mut e, Lang::En, &mut t);
+        assert_eq!(o.actions[..3], [Action::Backspace(6), Action::Type("привет".into()), Action::Tap(VK_SPACE)]);
+        assert!(o.actions.contains(&Action::SwitchLayout(Lang::Ru)));
+        // Backspace puts it back as typed
+        let o = e.on_key(VK_BACK, true, t + 10, Some(Lang::Ru), true);
+        assert_eq!(o.actions[1], Action::Type("ghdbtn".into()));
+        // An English typo stays English (the spelling module fixes it there)
+        e.reset();
+        typ(&mut e, "freind", Lang::En, &mut t);
+        let o = space(&mut e, Lang::En, &mut t);
+        assert_eq!(o.actions[1], Action::Type("friend".into()));
+        assert!(!o.actions.iter().any(|a| matches!(a, Action::SwitchLayout(_))));
+        // and the other way round: «freind» typed with Russian keys
+        e.reset();
+        typ(&mut e, "акуштв", Lang::Ru, &mut t);
+        let o = space(&mut e, Lang::Ru, &mut t);
+        assert_eq!(o.actions[1], Action::Type("friend".into()));
+        assert!(o.actions.contains(&Action::SwitchLayout(Lang::En)));
+        // Without the spelling module: left as typed
+        let mut e = Engine::new(Detector::new(), Settings::default());
         typ(&mut e, "ghdbtn", Lang::En, &mut t);
         assert!(!space(&mut e, Lang::En, &mut t).swallow);
     }
