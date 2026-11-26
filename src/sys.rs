@@ -5,9 +5,9 @@
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 
-use openswitch::config::{parse_exceptions, Settings, DEFAULT_FILE};
+use openswitch::config::{parse_always, parse_exceptions, Settings, DEFAULT_FILE};
 use openswitch::i18n;
-use openswitch::layout::{KeyMap, Lang};
+use openswitch::layout::{ukrainian_map, KeyMap, Lang, Language, Layout, Layouts};
 
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::System::Registry::*;
@@ -21,6 +21,13 @@ pub const OLD_APP_NAME: &str = "OpenPunto";
 pub const WINDOW_CLASS: &str = "OpenSwitchWindow";
 /// Message the settings window posts to the tray app after saving.
 pub const WM_RELOAD: u32 = WM_APP + 3;
+/// Message the settings window posts while it records a hotkey: wparam 1 = let all keys
+/// through for a few seconds (the window keeps re-sending it), 0 = back to normal.
+pub const WM_SUSPEND: u32 = WM_APP + 7;
+/// Message asking the tray app to quit (to restart it with other rights).
+pub const WM_QUIT_APP: u32 = WM_APP + 9;
+/// Message asking the tray app to forget the recent fixes.
+pub const WM_HISTORY_CLEAR: u32 = WM_APP + 11;
 /// Marker in dwExtraInfo of every event we inject.
 pub const OUR_MARK: usize = 0x0F_E7_C0_DE;
 
@@ -44,6 +51,12 @@ pub fn settings_path() -> PathBuf {
 pub fn exceptions_path() -> PathBuf {
     data_dir().join("exceptions.txt")
 }
+pub fn always_path() -> PathBuf {
+    data_dir().join("always.txt")
+}
+
+const ALWAYS_HEADER: &str = "# Слова, которые OpenSwitch всегда исправляет (выучены из ваших ручных исправлений).\r\n\
+# По одному на строку, в той раскладке, в которой вы их набираете.\r\n";
 
 const EXCEPTIONS_HEADER: &str = "# Слова, которые OpenSwitch никогда не будет исправлять автоматически.\r\n\
 # По одному на строку, в той раскладке, в которой вы их набираете.\r\n\
@@ -101,6 +114,48 @@ pub fn save_exceptions(words: &[String]) -> std::io::Result<()> {
     std::fs::write(exceptions_path(), t)
 }
 
+/// Words learned from manual fixes (always.txt; missing file = empty list), with the code of
+/// the layout to convert to when known.
+pub fn load_always() -> std::collections::HashMap<String, Option<String>> {
+    std::fs::read_to_string(always_path()).map(|t| parse_always(&t)).unwrap_or_default()
+}
+
+/// always.txt as sorted lines `word` / `word CODE` (for the settings window).
+pub fn always_lines() -> Vec<String> {
+    let mut v: Vec<String> = load_always()
+        .into_iter()
+        .map(|(w, code)| match code {
+            Some(c) => format!("{w} {c}"),
+            None => w,
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+pub fn save_always(words: &[String]) -> std::io::Result<()> {
+    ensure_data_dir();
+    let mut t = String::from(ALWAYS_HEADER);
+    for word in words {
+        t.push_str(word);
+        t.push_str("\r\n");
+    }
+    std::fs::write(always_path(), t)
+}
+
+/// Add (with the layout code) or remove (`code` None) one learned word.
+pub fn update_always(word: &str, code: Option<&str>) {
+    let mut words: Vec<String> =
+        always_lines().into_iter().filter(|l| l.split_whitespace().next() != Some(word)).collect();
+    if let Some(code) = code {
+        words.push(format!("{word} {code}"));
+    }
+    words.sort();
+    if let Err(e) = save_always(&words) {
+        log::error!("could not write always.txt: {e}");
+    }
+}
+
 pub fn append_exception(word: &str) {
     use std::io::Write;
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(exceptions_path()) {
@@ -113,6 +168,81 @@ pub fn save_setting(key: &str, value: &str) {
     let text = std::fs::read_to_string(&p).unwrap_or_else(|_| DEFAULT_FILE.to_string());
     let new = Settings::set_in_text(&text.replace("\r\n", "\n"), key, value);
     let _ = std::fs::write(&p, new.replace('\n', "\r\n"));
+}
+
+/// Write all settings files into one file (`path`).
+pub fn export_settings(path: &Path) -> std::io::Result<()> {
+    ensure_data_dir();
+    let read = |p: PathBuf| std::fs::read_to_string(p).unwrap_or_default();
+    let texts = [read(settings_path()), read(exceptions_path()), read(always_path())];
+    let files: Vec<(&str, &str)> =
+        openswitch::config::BUNDLE_FILES.iter().zip(texts.iter()).map(|(n, t)| (*n, t.as_str())).collect();
+    std::fs::write(path, openswitch::config::export_bundle(&files))
+}
+
+/// Take the settings files from an export. Settings tied to this computer (administrator
+/// rights, first-run window) stay as they are. Returns the problems found in settings.ini;
+/// Err if the file is no OpenSwitch export.
+pub fn import_settings(path: &Path) -> Result<Vec<String>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let files = openswitch::config::import_bundle(&text)
+        .ok_or_else(|| i18n::t("Not an OpenSwitch settings file").to_string())?;
+    ensure_data_dir();
+    let (current, _) = load_settings();
+    let mut warnings = Vec::new();
+    for (name, body) in files {
+        let crlf = body.replace('\n', "\r\n");
+        let result = match name.as_str() {
+            "settings.ini" => {
+                let (mut s, w) = Settings::parse(&body);
+                warnings = w;
+                s.run_as_admin = current.run_as_admin;
+                s.setup_done = current.setup_done;
+                save_settings(&s)
+            }
+            "exceptions.txt" => std::fs::write(exceptions_path(), crlf),
+            _ => std::fs::write(always_path(), crlf),
+        };
+        result.map_err(|e| e.to_string())?;
+    }
+    Ok(warnings)
+}
+
+/// The Windows "Save as" (`save`) or "Open" dialog for a settings export.
+pub fn file_dialog(save: bool) -> Option<PathBuf> {
+    use windows_sys::Win32::UI::Controls::Dialogs::*;
+    let mut buf = [0u16; 1024];
+    if save {
+        let name = w("openswitch-settings.txt");
+        buf[..name.len()].copy_from_slice(&name);
+    }
+    let filter: Vec<u16> = format!("{} (*.txt)\0*.txt\0{} (*.*)\0*.*\0\0", i18n::t("Text files"), i18n::t("All files"))
+        .encode_utf16()
+        .collect();
+    let ext = w("txt");
+    unsafe {
+        let mut o: OPENFILENAMEW = std::mem::zeroed();
+        o.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
+        o.hwndOwner = GetForegroundWindow();
+        o.lpstrFilter = filter.as_ptr();
+        o.lpstrFile = buf.as_mut_ptr();
+        o.nMaxFile = buf.len() as u32;
+        o.lpstrDefExt = ext.as_ptr();
+        o.Flags = OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST | if save { OFN_OVERWRITEPROMPT } else { OFN_FILEMUSTEXIST };
+        let ok = if save { GetSaveFileNameW(&mut o) } else { GetOpenFileNameW(&mut o) };
+        if ok == 0 {
+            return None;
+        }
+    }
+    let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    Some(PathBuf::from(String::from_utf16_lossy(&buf[..n])))
+}
+
+/// Open a web page in the default browser (only our own GitHub pages are passed here).
+pub fn open_url(url: &str) {
+    if url.starts_with("https://github.com/DezFix/OpenSwitch/") {
+        open_path(Path::new(url));
+    }
 }
 
 pub fn open_path(p: &Path) {
@@ -143,6 +273,54 @@ pub fn tray_window() -> HWND {
 pub fn notify_reload() -> bool {
     let h = tray_window();
     !h.is_null() && unsafe { PostMessageW(h, WM_RELOAD, 0, 0) } != 0
+}
+
+/// Close the running tray app and wait (up to 5 s) until its process has ended.
+pub fn quit_tray() {
+    let h = tray_window();
+    if h.is_null() {
+        return;
+    }
+    unsafe {
+        let mut pid = 0;
+        GetWindowThreadProcessId(h, &mut pid);
+        let process = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+        PostMessageW(h, WM_QUIT_APP, 0, 0);
+        if !process.is_null() {
+            WaitForSingleObject(process, 5000);
+            CloseHandle(process);
+        } else {
+            for _ in 0..50 {
+                if tray_window().is_null() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+    }
+}
+
+/// Ask the tray app to forget the recent fixes.
+pub fn clear_history() {
+    let h = tray_window();
+    if !h.is_null() {
+        unsafe { PostMessageW(h, WM_HISTORY_CLEAR, 0, 0) };
+    }
+}
+
+/// Ask the tray app to ignore keys (hotkeys included) while a hotkey is being recorded.
+pub fn suspend_hotkeys(on: bool) {
+    let h = tray_window();
+    if !h.is_null() {
+        unsafe { PostMessageW(h, WM_SUSPEND, on as usize, 0) };
+    }
+}
+
+/// Modification times of the settings and exception files, to notice edits made by hand.
+pub fn files_stamp() -> [Option<std::time::SystemTime>; 3] {
+    let m = |p: PathBuf| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    [m(settings_path()), m(exceptions_path()), m(always_path())]
 }
 
 // ---------------------------------------------------------------- autostart
@@ -249,19 +427,45 @@ fn primary_lang(hkl: HKL) -> usize {
     (hkl as usize) & 0x3FF
 }
 
-/// Which side of the pair a layout is on. All Cyrillic layouts we support (Russian,
-/// Ukrainian, Belarusian, including customised ones) count as `Lang::Ru`.
-pub fn lang_of_hkl(hkl: HKL) -> Option<Lang> {
+/// The dictionary language of a layout. Belarusian uses the Russian dictionary for now;
+/// layouts of other languages do not take part in switching.
+pub fn language_of_hkl(hkl: HKL) -> Option<Language> {
     match primary_lang(hkl) {
-        0x09 => Some(Lang::En),
-        0x19 | 0x22 | 0x23 => Some(Lang::Ru),
+        0x09 => Some(Language::En),
+        0x19 | 0x23 => Some(Language::Ru),
+        0x22 => Some(Language::Uk),
         _ => None,
     }
 }
 
-/// Is this a Ukrainian layout (the Ukrainian dictionary is then used too)?
-pub fn is_ukrainian(hkl: HKL) -> bool {
-    primary_lang(hkl) == 0x22
+/// The layouts that take part in switching, in Windows' order, with their handles.
+/// A Ukrainian layout also counts as Russian when there is no Russian layout, so Russian
+/// typed in it is not "fixed". Layouts in `disabled` (codes) are never switched to.
+pub fn build_layouts(installed: &[HKL], disabled: &std::collections::HashSet<String>) -> (Layouts, Vec<HKL>) {
+    let has_ru = installed.iter().any(|h| primary_lang(*h) == 0x19);
+    let mut list = Vec::new();
+    let mut hkls = Vec::new();
+    for &hkl in installed {
+        let Some(lang) = language_of_hkl(hkl) else { continue };
+        let mut languages = vec![lang];
+        if lang == Language::Uk && !has_ru {
+            languages.push(Language::Ru);
+        }
+        let code = layout_code(hkl);
+        let mut layout = Layout::new(read_keymap(hkl, lang), languages, code);
+        layout.target = !disabled.contains(code);
+        list.push(layout);
+        hkls.push(hkl);
+    }
+    (Layouts::new(list), hkls)
+}
+
+/// Codes of the installed layouts that can take part in switching (for the settings window).
+pub fn layout_codes() -> Vec<&'static str> {
+    let mut v: Vec<&'static str> =
+        installed_layouts().into_iter().filter(|h| language_of_hkl(*h).is_some()).map(layout_code).collect();
+    v.dedup();
+    v
 }
 
 /// Short code for the tray icon.
@@ -314,7 +518,7 @@ fn key_char(vk: u8, hkl: HKL, shift: bool, caps: bool) -> Option<char> {
 /// Read the key -> character map of an installed layout, so that customised layouts
 /// (e.g. Ukrainian with Russian letters added) convert correctly.
 /// Falls back to the built-in table if the layout looks broken.
-pub fn read_keymap(hkl: HKL, lang: Lang) -> KeyMap {
+pub fn read_keymap(hkl: HKL, lang: Language) -> KeyMap {
     let mut m = KeyMap::empty();
     for &vk in MAPPED_KEYS {
         let normal = key_char(vk, hkl, false, false);
@@ -325,7 +529,11 @@ pub fn read_keymap(hkl: HKL, lang: Lang) -> KeyMap {
     }
     if m.letter_count() < 20 {
         log::warn!("layout {:#x}: only {} letter keys, using the built-in table", hkl as usize, m.letter_count());
-        return KeyMap::builtin(lang);
+        return match lang {
+            Language::En => KeyMap::builtin(Lang::En),
+            Language::Ru => KeyMap::builtin(Lang::Ru),
+            Language::Uk => ukrainian_map(),
+        };
     }
     m
 }
@@ -351,10 +559,6 @@ pub fn focus_target(fg: HWND) -> (HWND, u32) {
         }
         (fg, tid)
     }
-}
-
-pub fn current_lang(fg: HWND) -> Option<Lang> {
-    lang_of_hkl(current_hkl(fg))
 }
 
 pub fn installed_layouts() -> Vec<HKL> {
@@ -430,5 +634,38 @@ pub fn press_system_toggle() {
     inputs.extend(keys.iter().rev().map(|&k| key_input(k, true)));
     unsafe {
         SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Export, change, import in a scratch %APPDATA% (changes the environment of the test
+    /// process, so it runs only on request: cargo test export_import -- --ignored).
+    #[test]
+    #[ignore]
+    fn export_import() {
+        let dir = std::env::temp_dir().join(format!("openswitch-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("APPDATA", &dir);
+        ensure_data_dir();
+        let s = Settings { theme: "dark".into(), run_as_admin: true, ..Settings::default() };
+        save_settings(&s).unwrap();
+        save_exceptions(&["ghbdtn".to_string()]).unwrap();
+        save_always(&["ntrcn RU".to_string()]).unwrap();
+        let file = dir.join("export.txt");
+        export_settings(&file).unwrap();
+
+        save_settings(&Settings { run_as_admin: false, ..Settings::default() }).unwrap();
+        save_exceptions(&[]).unwrap();
+        assert_eq!(import_settings(&file), Ok(vec![]));
+        let (back, _) = load_settings();
+        assert_eq!(back.theme, "dark");
+        assert!(!back.run_as_admin); // tied to this computer: not taken from the file
+        assert!(load_exceptions().contains("ghbdtn"));
+        assert_eq!(always_lines(), vec!["ntrcn RU".to_string()]);
+        assert!(import_settings(&settings_path()).is_err()); // a plain settings.ini is no export
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

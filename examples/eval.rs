@@ -16,7 +16,8 @@ fn run(d: &Detector, path: &str, lang: Lang, show: usize) {
             fp += 1;
             *fps.entry(w.to_string()).or_default() += 1;
         }
-        if d.check(&keys, lang.other()).switch {
+        let other = if lang == Lang::En { Lang::Ru } else { Lang::En };
+        if d.check(&keys, other).switch {
             hit += 1;
         } else {
             *misses.entry(w.to_string()).or_default() += 1;

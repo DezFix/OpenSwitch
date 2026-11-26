@@ -112,6 +112,14 @@ pub fn key_name(vk: u8) -> String {
     }
 }
 
+/// Can this key be the main key of a hotkey (i.e. saved to settings.ini and read back)?
+pub fn is_hotkey_key(vk: u8) -> bool {
+    vk != 0 && key_vk(&key_name(vk).to_ascii_lowercase()) == Some(vk)
+}
+
+/// Sensitivity presets shown in the settings window: (value, label key).
+pub const SENSITIVITY_PRESETS: [(f32, &str); 3] = [(0.7, "Cautious"), (1.0, "Normal"), (1.4, "Bold")];
+
 fn key_vk(name: &str) -> Option<u8> {
     let vk = match name {
         "pause" | "break" => VK_PAUSE,
@@ -140,33 +148,94 @@ fn key_vk(name: &str) -> Option<u8> {
 
 #[derive(Clone, Debug)]
 pub struct Settings {
+    /// Module "Layout": automatic and manual layout fixes, hotkeys, double Shift.
+    pub module_layout: bool,
+    /// Module "Text": capital letters, CapsLock fix, space before punctuation.
+    pub module_text: bool,
+    /// Module "Spelling": typo fixes with the built-in dictionaries.
+    pub module_spelling: bool,
+    /// Start with administrator rights through the Task Scheduler task (set by the settings
+    /// window together with the task itself).
+    pub run_as_admin: bool,
+    /// The first-run window was shown (or skipped).
+    pub setup_done: bool,
     pub auto_switch: bool,
     pub single_letters: bool,
     pub switch_on_enter: bool,
     pub double_shift: bool,
+    /// Backspace right after an automatic fix puts the word back as it was typed.
+    pub undo_backspace: bool,
+    /// Fix words typed with CapsLock on by accident (пРИВЕТ -> Привет) and turn CapsLock off.
+    pub fix_caps: bool,
+    /// Leave links, e-mail addresses, file names and camelCase identifiers alone.
+    pub skip_code: bool,
+    /// Do nothing while the user types in a password field.
+    pub skip_passwords: bool,
+    /// Be more careful with the first word after the user switched the layout themselves.
+    pub careful_after_switch: bool,
+    /// Remember words fixed by hand (Pause / Shift Shift) and fix them automatically next time.
+    pub learn_manual: bool,
+    /// Capital letter at the start of a sentence, English "i" -> "I".
+    pub capitalize: bool,
+    /// A short quiet click after an automatic fix.
+    pub sound: bool,
+    /// Once a day ask GitHub for the number of the latest version (off unless the user agrees).
+    pub check_updates: bool,
+    /// Remove the space typed before , . ! ? ("привет , как" -> "привет, как").
+    pub fix_space: bool,
     pub sensitivity: f32,
     pub hotkey_convert_word: Hotkey,
     pub hotkey_convert_selection: Hotkey,
     pub hotkey_toggle_auto: Hotkey,
     /// UI language: `system` (follow Windows), `en`, `ru` or `uk`.
     pub language: String,
+    /// Colours of the windows: `system` (follow Windows), `light` or `dark`.
+    pub theme: String,
     /// Executables (lowercase file names) where auto switching is disabled.
     pub exclude: HashSet<String>,
+    /// Executables where OpenSwitch does nothing at all (hotkeys included).
+    pub apps_off: HashSet<String>,
+    /// Executables that get the English layout each time you switch to them.
+    pub apps_english: HashSet<String>,
+    /// Executables that get back the layout they had when you left them.
+    pub apps_remember: HashSet<String>,
+    /// Layouts (codes like RU, UA) words are never switched *to* automatically.
+    pub disabled_layouts: HashSet<String>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Settings {
+            module_layout: true,
+            module_text: true,
+            module_spelling: false,
+            setup_done: false,
+            run_as_admin: false,
             auto_switch: true,
             single_letters: true,
             switch_on_enter: true,
             double_shift: true,
+            undo_backspace: true,
+            fix_caps: true,
+            skip_code: true,
+            skip_passwords: true,
+            careful_after_switch: true,
+            learn_manual: true,
+            capitalize: true,
+            fix_space: true,
+            sound: false,
+            check_updates: false,
             sensitivity: 1.0,
             hotkey_convert_word: Hotkey { vk: VK_PAUSE, ..Hotkey::NONE },
             hotkey_convert_selection: Hotkey { vk: VK_PAUSE, shift: true, ..Hotkey::NONE },
             hotkey_toggle_auto: Hotkey { vk: VK_PAUSE, alt: true, ..Hotkey::NONE },
             language: "system".into(),
+            theme: "system".into(),
             exclude: DEFAULT_EXCLUDE.iter().map(|s| s.to_string()).collect(),
+            apps_off: HashSet::new(),
+            apps_english: HashSet::new(),
+            apps_remember: HashSet::new(),
+            disabled_layouts: HashSet::new(),
         }
     }
 }
@@ -183,9 +252,59 @@ const DEFAULT_EXCLUDE: &[&str] = &[
     "keepassxc.exe",
 ];
 
+/// Line before each file in a settings export (one text file for moving to another computer).
+const BUNDLE_MARK: &str = "#### OpenSwitch file: ";
+/// The files a settings export holds.
+pub const BUNDLE_FILES: [&str; 3] = ["settings.ini", "exceptions.txt", "always.txt"];
+
+/// One text file with the given files (name, text) one after another.
+pub fn export_bundle(files: &[(&str, &str)]) -> String {
+    let mut out = String::from("# OpenSwitch settings export. Import it in Settings -> About.\r\n");
+    for (name, text) in files {
+        out.push_str(&format!("{BUNDLE_MARK}{name}\r\n"));
+        out.push_str(&text.replace("\r\n", "\n").trim_end_matches('\n').replace('\n', "\r\n"));
+        out.push_str("\r\n");
+    }
+    out
+}
+
+/// The files of a settings export (known names only); None if it is no export or has no
+/// settings.ini.
+pub fn import_bundle(text: &str) -> Option<Vec<(String, String)>> {
+    let mut files: Vec<(String, String)> = Vec::new();
+    for line in text.replace("\r\n", "\n").split('\n') {
+        if let Some(name) = line.trim_start_matches('\u{feff}').strip_prefix(BUNDLE_MARK) {
+            files.push((name.trim().to_string(), String::new()));
+        } else if let Some((_, body)) = files.last_mut() {
+            body.push_str(line);
+            body.push('\n');
+        }
+    }
+    files.retain(|(n, _)| BUNDLE_FILES.contains(&n.as_str()));
+    files.iter().any(|(n, _)| n == "settings.ini").then_some(files)
+}
+
+/// Values of `theme`.
+pub const THEMES: [&str; 3] = ["system", "light", "dark"];
+
 pub const DEFAULT_FILE: &str = "\
 # OpenSwitch - настройки. Удобнее менять в окне «Настройки» (меню значка в трее).\n# После ручной правки файла: меню в трее -> «Перечитать настройки».
 # Значения true/false. Горячие клавиши: Pause, Shift+Pause, Alt+Pause, Ctrl+Shift+F12, ScrollLock, none ...
+
+# Модули: что OpenSwitch делает. Каждый включается отдельно.
+# Раскладка: исправление слов, набранных не в той раскладке, горячие клавиши
+module_layout = true
+# Текст: заглавные буквы, случайный CapsLock, пробел перед знаками
+module_text = true
+# Орфография: исправление опечаток по встроенным словарям
+module_spelling = false
+
+# Окно первого запуска уже показано
+setup_done = false
+
+# Запускаться с правами администратора (через задачу Планировщика «OpenSwitch»).
+# Меняйте в окне настроек: там же создаётся и удаляется сама задача.
+run_as_admin = false
 
 # Автоматически исправлять слова, набранные не в той раскладке
 auto_switch = true
@@ -199,11 +318,45 @@ switch_on_enter = true
 # Двойное нажатие Shift = исправить последнее слово (удобно на ноутбуках без Pause)
 double_shift = true
 
+# Backspace сразу после автоисправления возвращает слово как было набрано
+undo_backspace = true
+
+# Исправлять случайно нажатый CapsLock (пРИВЕТ -> Привет) и выключать его
+fix_caps = true
+
+# Не трогать ссылки, почту, имена файлов и идентификаторы вида camelCase
+skip_code = true
+
+# Ничего не делать в полях пароля (пароль не исправляется и не запоминается)
+skip_passwords = true
+
+# Осторожнее с первым словом после того, как вы сами переключили раскладку
+careful_after_switch = true
+
+# Запоминать слова, исправленные вручную (Pause), и дальше исправлять их сразу (always.txt)
+learn_manual = true
+
+# Заглавная буква в начале предложения (после . ! ? и Enter), английское i -> I
+capitalize = true
+
+# Убирать пробел перед знаком препинания: «привет , как» -> «привет, как»
+fix_space = true
+
+# Тихий щелчок после автоматического исправления
+sound = false
+
+# Раз в сутки спрашивать у GitHub номер последней версии (больше ничего не отправляется;
+# скачивать и ставить новую версию — только вы сами)
+check_updates = false
+
 # Чувствительность автопереключения: 0.5 (осторожно) ... 2.0 (агрессивно)
 sensitivity = 1.0
 
 # Язык интерфейса: system (как в Windows), en, ru, uk
 language = system
+
+# Тема окон: system (как в Windows), light (светлая), dark (тёмная)
+theme = system
 
 # Исправить последнее слово (повторное нажатие — вернуть обратно)
 hotkey_convert_word = Pause
@@ -214,10 +367,52 @@ hotkey_convert_selection = Shift+Pause
 # Включить/выключить автопереключение
 hotkey_toggle_auto = Alt+Pause
 
+# Раскладки, на которые не переключать автоматически (коды через запятую: EN, RU, UA, BY)
+disabled_layouts =
+
 # Программы, в которых автопереключение не работает (ручное исправление работает).
 # Имена exe через запятую.
 exclude = cmd.exe, powershell.exe, pwsh.exe, windowsterminal.exe, conhost.exe, putty.exe, mintty.exe, keepass.exe, keepassxc.exe
+
+# Программы, в которых OpenSwitch не делает ничего (и горячие клавиши тоже не работают)
+apps_off =
+
+# Программы, в которых при каждом переходе в них включается английская раскладка
+apps_english =
+
+# Программы, в которых при возврате восстанавливается раскладка, с которой вы из них ушли
+apps_remember =
 ";
+
+/// How OpenSwitch treats one program.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AppRule {
+    /// As everywhere.
+    Normal,
+    /// No automatic fixes; hotkeys work (`exclude`).
+    Manual,
+    /// The English layout each time you switch to the program.
+    English,
+    /// The layout it had when you left it.
+    Remember,
+    /// Nothing at all.
+    Off,
+}
+
+impl AppRule {
+    /// The rules a program in the list can have.
+    pub const LISTED: [AppRule; 4] = [AppRule::Manual, AppRule::English, AppRule::Remember, AppRule::Off];
+}
+
+fn exe_list(v: &str) -> HashSet<String> {
+    v.split([',', ';']).map(|x| x.trim().to_lowercase()).filter(|x| !x.is_empty()).collect()
+}
+
+fn sorted_list(set: &HashSet<String>) -> String {
+    let mut v: Vec<&str> = set.iter().map(|s| s.as_str()).collect();
+    v.sort();
+    v.join(", ")
+}
 
 fn parse_bool(v: &str) -> Option<bool> {
     match v.trim().to_ascii_lowercase().as_str() {
@@ -243,10 +438,25 @@ impl Settings {
             };
             let (k, v) = (k.trim().to_ascii_lowercase(), v.trim());
             let ok = match k.as_str() {
+                "module_layout" => parse_bool(v).map(|b| s.module_layout = b).is_some(),
+                "module_text" => parse_bool(v).map(|b| s.module_text = b).is_some(),
+                "module_spelling" => parse_bool(v).map(|b| s.module_spelling = b).is_some(),
+                "setup_done" => parse_bool(v).map(|b| s.setup_done = b).is_some(),
+                "run_as_admin" => parse_bool(v).map(|b| s.run_as_admin = b).is_some(),
                 "auto_switch" => parse_bool(v).map(|b| s.auto_switch = b).is_some(),
                 "single_letters" => parse_bool(v).map(|b| s.single_letters = b).is_some(),
                 "switch_on_enter" => parse_bool(v).map(|b| s.switch_on_enter = b).is_some(),
                 "double_shift" => parse_bool(v).map(|b| s.double_shift = b).is_some(),
+                "undo_backspace" => parse_bool(v).map(|b| s.undo_backspace = b).is_some(),
+                "fix_caps" => parse_bool(v).map(|b| s.fix_caps = b).is_some(),
+                "skip_code" => parse_bool(v).map(|b| s.skip_code = b).is_some(),
+                "skip_passwords" => parse_bool(v).map(|b| s.skip_passwords = b).is_some(),
+                "careful_after_switch" => parse_bool(v).map(|b| s.careful_after_switch = b).is_some(),
+                "learn_manual" => parse_bool(v).map(|b| s.learn_manual = b).is_some(),
+                "capitalize" => parse_bool(v).map(|b| s.capitalize = b).is_some(),
+                "fix_space" => parse_bool(v).map(|b| s.fix_space = b).is_some(),
+                "sound" => parse_bool(v).map(|b| s.sound = b).is_some(),
+                "check_updates" => parse_bool(v).map(|b| s.check_updates = b).is_some(),
                 "sensitivity" => v.parse::<f32>().ok().filter(|x| *x > 0.0).map(|x| s.sensitivity = x).is_some(),
                 "language" => {
                     let code = v.to_ascii_lowercase();
@@ -257,9 +467,35 @@ impl Settings {
                         false
                     }
                 }
+                "theme" => {
+                    let v = v.to_ascii_lowercase();
+                    if THEMES.contains(&v.as_str()) {
+                        s.theme = v;
+                        true
+                    } else {
+                        false
+                    }
+                }
                 "hotkey_convert_word" => Hotkey::parse(v).map(|h| s.hotkey_convert_word = h).is_some(),
                 "hotkey_convert_selection" => Hotkey::parse(v).map(|h| s.hotkey_convert_selection = h).is_some(),
                 "hotkey_toggle_auto" => Hotkey::parse(v).map(|h| s.hotkey_toggle_auto = h).is_some(),
+                "disabled_layouts" => {
+                    s.disabled_layouts =
+                        v.split([',', ';']).map(|x| x.trim().to_uppercase()).filter(|x| !x.is_empty()).collect();
+                    true
+                }
+                "apps_off" => {
+                    s.apps_off = exe_list(v);
+                    true
+                }
+                "apps_english" => {
+                    s.apps_english = exe_list(v);
+                    true
+                }
+                "apps_remember" => {
+                    s.apps_remember = exe_list(v);
+                    true
+                }
                 "exclude" => {
                     s.exclude =
                         v.split([',', ';']).map(|x| x.trim().to_lowercase()).filter(|x| !x.is_empty()).collect();
@@ -277,6 +513,45 @@ impl Settings {
         (s, warn)
     }
 
+    /// The rule of a program (lowercase exe name). A program in several lists: the strictest.
+    pub fn app_rule(&self, exe: &str) -> AppRule {
+        if self.apps_off.contains(exe) {
+            AppRule::Off
+        } else if self.exclude.contains(exe) {
+            AppRule::Manual
+        } else if self.apps_english.contains(exe) {
+            AppRule::English
+        } else if self.apps_remember.contains(exe) {
+            AppRule::Remember
+        } else {
+            AppRule::Normal
+        }
+    }
+
+    /// Give a program a rule (`Normal` takes it off the lists).
+    pub fn set_app_rule(&mut self, exe: &str, rule: AppRule) {
+        for list in [&mut self.apps_off, &mut self.exclude, &mut self.apps_english, &mut self.apps_remember] {
+            list.remove(exe);
+        }
+        let list = match rule {
+            AppRule::Normal => return,
+            AppRule::Manual => &mut self.exclude,
+            AppRule::English => &mut self.apps_english,
+            AppRule::Remember => &mut self.apps_remember,
+            AppRule::Off => &mut self.apps_off,
+        };
+        list.insert(exe.to_string());
+    }
+
+    /// Every program with a rule, sorted by name.
+    pub fn app_rules(&self) -> Vec<(String, AppRule)> {
+        let mut names: Vec<&String> =
+            self.exclude.iter().chain(&self.apps_off).chain(&self.apps_english).chain(&self.apps_remember).collect();
+        names.sort();
+        names.dedup();
+        names.into_iter().map(|n| (n.clone(), self.app_rule(n))).collect()
+    }
+
     /// Serialise to the settings file format (with comments).
     pub fn to_text(&self) -> String {
         let b = |x: bool| if x { "true" } else { "false" };
@@ -285,16 +560,40 @@ impl Settings {
         let ex: Vec<&str> = ex.iter().map(|s| s.as_str()).collect();
         let mut t = String::from(DEFAULT_FILE);
         for (k, v) in [
+            ("module_layout", b(self.module_layout).to_string()),
+            ("module_text", b(self.module_text).to_string()),
+            ("module_spelling", b(self.module_spelling).to_string()),
+            ("setup_done", b(self.setup_done).to_string()),
+            ("run_as_admin", b(self.run_as_admin).to_string()),
             ("auto_switch", b(self.auto_switch).to_string()),
             ("single_letters", b(self.single_letters).to_string()),
             ("switch_on_enter", b(self.switch_on_enter).to_string()),
             ("double_shift", b(self.double_shift).to_string()),
+            ("undo_backspace", b(self.undo_backspace).to_string()),
+            ("fix_caps", b(self.fix_caps).to_string()),
+            ("skip_code", b(self.skip_code).to_string()),
+            ("skip_passwords", b(self.skip_passwords).to_string()),
+            ("careful_after_switch", b(self.careful_after_switch).to_string()),
+            ("learn_manual", b(self.learn_manual).to_string()),
+            ("capitalize", b(self.capitalize).to_string()),
+            ("fix_space", b(self.fix_space).to_string()),
+            ("sound", b(self.sound).to_string()),
+            ("check_updates", b(self.check_updates).to_string()),
             ("sensitivity", format!("{:.2}", self.sensitivity)),
             ("language", self.language.clone()),
+            ("theme", self.theme.clone()),
             ("hotkey_convert_word", self.hotkey_convert_word.to_string()),
             ("hotkey_convert_selection", self.hotkey_convert_selection.to_string()),
             ("hotkey_toggle_auto", self.hotkey_toggle_auto.to_string()),
             ("exclude", ex.join(", ")),
+            ("apps_off", sorted_list(&self.apps_off)),
+            ("apps_english", sorted_list(&self.apps_english)),
+            ("apps_remember", sorted_list(&self.apps_remember)),
+            ("disabled_layouts", {
+                let mut d: Vec<&str> = self.disabled_layouts.iter().map(|s| s.as_str()).collect();
+                d.sort();
+                d.join(", ")
+            }),
         ] {
             t = Settings::set_in_text(&t, k, &v);
         }
@@ -326,6 +625,20 @@ impl Settings {
     }
 }
 
+/// Learned words (always.txt): `word` or `word CODE` per line (CODE = layout to convert to,
+/// e.g. UA), `#` comments.
+pub fn parse_always(text: &str) -> std::collections::HashMap<String, Option<String>> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .filter_map(|l| {
+            let mut parts = l.split_whitespace();
+            let word = parts.next()?.to_lowercase();
+            Some((word, parts.next().map(str::to_uppercase)))
+        })
+        .collect()
+}
+
 /// User exception list: one word per line, `#` comments.
 pub fn parse_exceptions(text: &str) -> HashSet<String> {
     text.lines().map(|l| l.trim().to_lowercase()).filter(|l| !l.is_empty() && !l.starts_with('#')).collect()
@@ -347,6 +660,14 @@ mod tests {
     }
 
     #[test]
+    fn always_list() {
+        let m = parse_always("# comment\nghbdtn\nGhbdsn ua\n\n");
+        assert_eq!(m.get("ghbdtn"), Some(&None));
+        assert_eq!(m.get("ghbdsn"), Some(&Some("UA".to_string())));
+        assert_eq!(m.len(), 2);
+    }
+
+    #[test]
     fn hotkeys() {
         assert_eq!(Hotkey::parse("Pause").unwrap().vk, VK_PAUSE);
         let h = Hotkey::parse("Ctrl+Shift+F12").unwrap();
@@ -354,6 +675,70 @@ mod tests {
         assert!(Hotkey::parse("Ctrl+Pause").unwrap().matches(VK_CANCEL, true, false, false, false));
         assert_eq!(Hotkey::parse("none"), Some(Hotkey::NONE));
         assert!(Hotkey::parse("Ctrl+Foo").is_none());
+    }
+
+    #[test]
+    fn hotkey_keys_round_trip() {
+        for vk in [VK_PAUSE, 0x91, 0x14, 0x2D, 0x20, 0x5D, 0x2C, 0x70, 0x87, b'A', b'Z', b'0', b'9'] {
+            assert!(is_hotkey_key(vk), "{vk:#x}");
+        }
+        // Delete, arrows, Enter, Esc have no name in settings.ini
+        for vk in [0, 0x2E, 0x25, 0x0D, 0x1B, 0x10] {
+            assert!(!is_hotkey_key(vk), "{vk:#x}");
+        }
+    }
+
+    /// A settings.ini written by OpenSwitch 0.3.0 still reads without warnings, keeps its
+    /// values and gets the new options with their defaults when saved again.
+    #[test]
+    fn settings_from_0_3_0() {
+        let old = include_str!("../tests/fixtures/settings-0.3.0.ini")
+            .replace("auto_switch = true", "auto_switch = false")
+            .replace("exclude = cmd.exe,", "exclude = code.exe, cmd.exe,");
+        let (s, w) = Settings::parse(&old);
+        assert!(w.is_empty(), "{w:?}");
+        assert!(!s.auto_switch);
+        assert_eq!(s.app_rule("code.exe"), AppRule::Manual);
+        assert!(!s.setup_done); // the first-run guide shows once after the update
+        let saved = Settings::set_in_text(&old, "setup_done", "true");
+        let (again, w) = Settings::parse(&Settings::parse(&saved).0.to_text());
+        assert!(w.is_empty(), "{w:?}");
+        assert!(!again.auto_switch && again.setup_done && again.skip_passwords && !again.check_updates);
+    }
+
+    #[test]
+    fn app_rules() {
+        let mut s = Settings::default();
+        assert_eq!(s.app_rule("cmd.exe"), AppRule::Manual);
+        assert_eq!(s.app_rule("chrome.exe"), AppRule::Normal);
+        s.set_app_rule("cmd.exe", AppRule::Off);
+        s.set_app_rule("code.exe", AppRule::English);
+        s.set_app_rule("telegram.exe", AppRule::Remember);
+        assert!(!s.exclude.contains("cmd.exe"));
+        let (p, w) = Settings::parse(&s.to_text());
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(p.app_rule("cmd.exe"), AppRule::Off);
+        assert_eq!(p.app_rule("code.exe"), AppRule::English);
+        assert_eq!(p.app_rule("telegram.exe"), AppRule::Remember);
+        assert_eq!(p.app_rule("putty.exe"), AppRule::Manual);
+        s.set_app_rule("code.exe", AppRule::Normal);
+        assert_eq!(s.app_rule("code.exe"), AppRule::Normal);
+        assert!(s.app_rules().iter().any(|(n, r)| n == "cmd.exe" && *r == AppRule::Off));
+        // an old settings.ini (only exclude) still works
+        let (old, _) = Settings::parse("exclude = game.exe");
+        assert_eq!(old.app_rule("game.exe"), AppRule::Manual);
+    }
+
+    #[test]
+    fn settings_export_round_trip() {
+        let b =
+            export_bundle(&[("settings.ini", "a = 1\r\n# x\r\n"), ("exceptions.txt", "ghbdtn\n"), ("evil.exe", "x")]);
+        let f = import_bundle(&b).unwrap();
+        assert_eq!(f[0], ("settings.ini".to_string(), "a = 1\n# x\n".to_string()));
+        assert_eq!(f[1], ("exceptions.txt".to_string(), "ghbdtn\n".to_string()));
+        assert_eq!(f.len(), 2); // unknown names are dropped
+        assert!(import_bundle("theme = dark").is_none());
+        assert!(import_bundle(&export_bundle(&[("always.txt", "x")])).is_none());
     }
 
     #[test]
@@ -368,6 +753,11 @@ mod tests {
 
         let m = Settings {
             auto_switch: false,
+            skip_passwords: false,
+            run_as_admin: true,
+            theme: "dark".into(),
+            sound: true,
+            check_updates: true,
             sensitivity: 1.5,
             hotkey_convert_word: Hotkey::parse("Ctrl+Shift+F12").unwrap(),
             hotkey_toggle_auto: Hotkey::NONE,
@@ -377,6 +767,13 @@ mod tests {
         let (p, w) = Settings::parse(&m.to_text());
         assert!(w.is_empty(), "{w:?}");
         assert!(!p.auto_switch);
+        assert!(!p.skip_passwords);
+        assert!(p.run_as_admin && !d.run_as_admin);
+        assert_eq!((p.theme.as_str(), s.theme.as_str()), ("dark", "system"));
+        assert!(p.sound && !s.sound);
+        assert!(p.check_updates && !s.check_updates && !d.check_updates);
+        assert_eq!(Settings::parse("theme = blue").1.len(), 1);
+        assert!(d.skip_passwords && s.skip_passwords);
         assert_eq!(p.sensitivity, 1.5);
         assert_eq!(p.hotkey_convert_word, m.hotkey_convert_word);
         assert_eq!(p.hotkey_toggle_auto, Hotkey::NONE);
