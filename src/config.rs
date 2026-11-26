@@ -237,6 +237,38 @@ const DEFAULT_EXCLUDE: &[&str] = &[
     "keepassxc.exe",
 ];
 
+/// Line before each file in a settings export (one text file for moving to another computer).
+const BUNDLE_MARK: &str = "#### OpenSwitch file: ";
+/// The files a settings export holds.
+pub const BUNDLE_FILES: [&str; 3] = ["settings.ini", "exceptions.txt", "always.txt"];
+
+/// One text file with the given files (name, text) one after another.
+pub fn export_bundle(files: &[(&str, &str)]) -> String {
+    let mut out = String::from("# OpenSwitch settings export. Import it in Settings -> About.\r\n");
+    for (name, text) in files {
+        out.push_str(&format!("{BUNDLE_MARK}{name}\r\n"));
+        out.push_str(&text.replace("\r\n", "\n").trim_end_matches('\n').replace('\n', "\r\n"));
+        out.push_str("\r\n");
+    }
+    out
+}
+
+/// The files of a settings export (known names only); None if it is no export or has no
+/// settings.ini.
+pub fn import_bundle(text: &str) -> Option<Vec<(String, String)>> {
+    let mut files: Vec<(String, String)> = Vec::new();
+    for line in text.replace("\r\n", "\n").split('\n') {
+        if let Some(name) = line.trim_start_matches('\u{feff}').strip_prefix(BUNDLE_MARK) {
+            files.push((name.trim().to_string(), String::new()));
+        } else if let Some((_, body)) = files.last_mut() {
+            body.push_str(line);
+            body.push('\n');
+        }
+    }
+    files.retain(|(n, _)| BUNDLE_FILES.contains(&n.as_str()));
+    files.iter().any(|(n, _)| n == "settings.ini").then_some(files)
+}
+
 /// Values of `theme`.
 pub const THEMES: [&str; 3] = ["system", "light", "dark"];
 
@@ -535,6 +567,18 @@ mod tests {
         for vk in [0, 0x2E, 0x25, 0x0D, 0x1B, 0x10] {
             assert!(!is_hotkey_key(vk), "{vk:#x}");
         }
+    }
+
+    #[test]
+    fn settings_export_round_trip() {
+        let b =
+            export_bundle(&[("settings.ini", "a = 1\r\n# x\r\n"), ("exceptions.txt", "ghbdtn\n"), ("evil.exe", "x")]);
+        let f = import_bundle(&b).unwrap();
+        assert_eq!(f[0], ("settings.ini".to_string(), "a = 1\n# x\n".to_string()));
+        assert_eq!(f[1], ("exceptions.txt".to_string(), "ghbdtn\n".to_string()));
+        assert_eq!(f.len(), 2); // unknown names are dropped
+        assert!(import_bundle("theme = dark").is_none());
+        assert!(import_bundle(&export_bundle(&[("always.txt", "x")])).is_none());
     }
 
     #[test]

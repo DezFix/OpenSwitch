@@ -752,6 +752,32 @@ impl SettingsApp {
             });
         }
 
+        let (label, hint) =
+            (t("Move to another computer"), t("Settings, exception words and learned words in one file"));
+        if p.row(ui, &[label, hint, "export", "import", "backup"]) {
+            setting_row(ui, label, Some(hint), |ui| {
+                if ui.button(t("Import…")).clicked() {
+                    if let Some(path) = sys::file_dialog(false) {
+                        self.status = Some(match sys::import_settings(&path) {
+                            Ok(w) if w.is_empty() => (t("Settings imported").into(), true, Instant::now()),
+                            Ok(w) => (i18n::f("Errors in settings.ini:\n{}", &[&w.join("\n")]), false, Instant::now()),
+                            Err(e) => (e, false, Instant::now()),
+                        });
+                        self.reload_from_disk();
+                        self.tray_running = sys::notify_reload();
+                    }
+                }
+                if ui.button(t("Export…")).clicked() {
+                    if let Some(path) = sys::file_dialog(true) {
+                        self.status = Some(match sys::export_settings(&path) {
+                            Ok(()) => (t("Settings exported").into(), true, Instant::now()),
+                            Err(e) => (i18n::f("Could not save: {}", &[&e]), false, Instant::now()),
+                        });
+                    }
+                }
+            });
+        }
+
         let (label, hint) = (t("Reset settings"), t("Exception words are kept"));
         if p.row(ui, &[label, hint]) {
             setting_row(ui, label, Some(hint), |ui| {

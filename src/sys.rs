@@ -168,6 +168,74 @@ pub fn save_setting(key: &str, value: &str) {
     let _ = std::fs::write(&p, new.replace('\n', "\r\n"));
 }
 
+/// Write all settings files into one file (`path`).
+pub fn export_settings(path: &Path) -> std::io::Result<()> {
+    ensure_data_dir();
+    let read = |p: PathBuf| std::fs::read_to_string(p).unwrap_or_default();
+    let texts = [read(settings_path()), read(exceptions_path()), read(always_path())];
+    let files: Vec<(&str, &str)> =
+        openswitch::config::BUNDLE_FILES.iter().zip(texts.iter()).map(|(n, t)| (*n, t.as_str())).collect();
+    std::fs::write(path, openswitch::config::export_bundle(&files))
+}
+
+/// Take the settings files from an export. Settings tied to this computer (administrator
+/// rights, first-run window) stay as they are. Returns the problems found in settings.ini;
+/// Err if the file is no OpenSwitch export.
+pub fn import_settings(path: &Path) -> Result<Vec<String>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let files = openswitch::config::import_bundle(&text)
+        .ok_or_else(|| i18n::t("Not an OpenSwitch settings file").to_string())?;
+    ensure_data_dir();
+    let (current, _) = load_settings();
+    let mut warnings = Vec::new();
+    for (name, body) in files {
+        let crlf = body.replace('\n', "\r\n");
+        let result = match name.as_str() {
+            "settings.ini" => {
+                let (mut s, w) = Settings::parse(&body);
+                warnings = w;
+                s.run_as_admin = current.run_as_admin;
+                s.setup_done = current.setup_done;
+                save_settings(&s)
+            }
+            "exceptions.txt" => std::fs::write(exceptions_path(), crlf),
+            _ => std::fs::write(always_path(), crlf),
+        };
+        result.map_err(|e| e.to_string())?;
+    }
+    Ok(warnings)
+}
+
+/// The Windows "Save as" (`save`) or "Open" dialog for a settings export.
+pub fn file_dialog(save: bool) -> Option<PathBuf> {
+    use windows_sys::Win32::UI::Controls::Dialogs::*;
+    let mut buf = [0u16; 1024];
+    if save {
+        let name = w("openswitch-settings.txt");
+        buf[..name.len()].copy_from_slice(&name);
+    }
+    let filter: Vec<u16> = format!("{} (*.txt)\0*.txt\0{} (*.*)\0*.*\0\0", i18n::t("Text files"), i18n::t("All files"))
+        .encode_utf16()
+        .collect();
+    let ext = w("txt");
+    unsafe {
+        let mut o: OPENFILENAMEW = std::mem::zeroed();
+        o.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
+        o.hwndOwner = GetForegroundWindow();
+        o.lpstrFilter = filter.as_ptr();
+        o.lpstrFile = buf.as_mut_ptr();
+        o.nMaxFile = buf.len() as u32;
+        o.lpstrDefExt = ext.as_ptr();
+        o.Flags = OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST | if save { OFN_OVERWRITEPROMPT } else { OFN_FILEMUSTEXIST };
+        let ok = if save { GetSaveFileNameW(&mut o) } else { GetOpenFileNameW(&mut o) };
+        if ok == 0 {
+            return None;
+        }
+    }
+    let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    Some(PathBuf::from(String::from_utf16_lossy(&buf[..n])))
+}
+
 pub fn open_path(p: &Path) {
     unsafe {
         ShellExecuteW(
@@ -549,5 +617,38 @@ pub fn press_system_toggle() {
     inputs.extend(keys.iter().rev().map(|&k| key_input(k, true)));
     unsafe {
         SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Export, change, import in a scratch %APPDATA% (changes the environment of the test
+    /// process, so it runs only on request: cargo test export_import -- --ignored).
+    #[test]
+    #[ignore]
+    fn export_import() {
+        let dir = std::env::temp_dir().join(format!("openswitch-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("APPDATA", &dir);
+        ensure_data_dir();
+        let s = Settings { theme: "dark".into(), run_as_admin: true, ..Settings::default() };
+        save_settings(&s).unwrap();
+        save_exceptions(&["ghbdtn".to_string()]).unwrap();
+        save_always(&["ntrcn RU".to_string()]).unwrap();
+        let file = dir.join("export.txt");
+        export_settings(&file).unwrap();
+
+        save_settings(&Settings { run_as_admin: false, ..Settings::default() }).unwrap();
+        save_exceptions(&[]).unwrap();
+        assert_eq!(import_settings(&file), Ok(vec![]));
+        let (back, _) = load_settings();
+        assert_eq!(back.theme, "dark");
+        assert!(!back.run_as_admin); // tied to this computer: not taken from the file
+        assert!(load_exceptions().contains("ghbdtn"));
+        assert_eq!(always_lines(), vec!["ntrcn RU".to_string()]);
+        assert!(import_settings(&settings_path()).is_err()); // a plain settings.ini is no export
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
