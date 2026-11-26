@@ -484,7 +484,7 @@ impl SettingsApp {
         p.begin(Section::Spelling);
         let (label, hint) = (
             t("Module «Spelling»"),
-            t("Fixes typos with the built-in dictionaries: «првиет» becomes «привет». Only when the fix is clear; words of 5+ letters."),
+            t("Fixes typos with the built-in dictionaries: «првиет» becomes «привет». Only when it is at least 85 % sure; words of 5+ letters."),
         );
         if p.row(ui, &[label, hint, "typo"]) {
             module_row(ui, label, hint, &mut self.s.module_spelling);

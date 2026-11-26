@@ -105,7 +105,7 @@ impl SetupApp {
         module_row(
             ui,
             t("Module «Spelling»"),
-            t("Fixes typos with the built-in dictionaries: «првиет» becomes «привет». Only when the fix is clear; words of 5+ letters."),
+            t("Fixes typos with the built-in dictionaries: «првиет» becomes «привет». Only when it is at least 85 % sure; words of 5+ letters."),
             &mut self.s.module_spelling,
         );
     }

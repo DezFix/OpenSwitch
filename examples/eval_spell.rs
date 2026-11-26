@@ -116,12 +116,8 @@ fn main() {
     let d = Tuning::default();
     let mut variants = vec![("default", d)];
     if std::env::var("SWEEP").is_ok() {
-        for likely_only in [false, true] {
-            for ending in [0, 2] {
-                for min_gain in [-9.0, 0.0] {
-                    variants.push(("", Tuning { likely_only, ending, min_gain, ..d }));
-                }
-            }
+        for min_confidence in [0.8, 0.9] {
+            variants.push(("", Tuning { min_confidence, ..d }));
         }
     }
     let (men, mru, muk) = (LangModel::new(Language::En), LangModel::new(Language::Ru), LangModel::new(Language::Uk));

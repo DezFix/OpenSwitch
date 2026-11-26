@@ -23,8 +23,10 @@ pub struct Tuning {
     /// Fix only typical typos (swapped letters, a neighbouring key, a doubled or missed
     /// letter, е/и and о/а), never an arbitrary wrong letter.
     pub likely_only: bool,
-    /// The best fix must be this many times "better" than the second one.
-    pub margin: u64,
+    /// How sure we must be that the best fix is the word meant, 0..1. Every candidate gets a
+    /// weight (more frequent words and typical typos weigh more); the confidence is the share
+    /// of the best one in the total. 0.85 = fixed only when 85 % sure.
+    pub min_confidence: f64,
     /// Letters at the end of a word where a different, extra or missing letter is usually an
     /// ending (breakfasts / breakfast, извинений / извинения), not a typo.
     pub ending: usize,
@@ -35,7 +37,7 @@ pub struct Tuning {
 
 impl Default for Tuning {
     fn default() -> Self {
-        Tuning { max_rank: 30_000, unlikely: 6, likely_only: true, margin: 4, ending: 2, min_gain: 0.0 }
+        Tuning { max_rank: 30_000, unlikely: 6, likely_only: true, min_confidence: 0.85, ending: 2, min_gain: 0.0 }
     }
 }
 
@@ -72,6 +74,14 @@ fn neighbours(map: Option<&KeyMap>, a: char, b: char) -> bool {
 fn confusable(a: char, b: char) -> bool {
     let pair = |x, y| (a == x && b == y) || (a == y && b == x);
     pair('е', 'и') || pair('о', 'а') || pair('е', 'я') || pair('и', 'ы') || pair('е', 'є') || pair('и', 'і')
+}
+
+/// How sure we are of the first of `costs` (sorted, smaller = better): its weight 1/cost as a
+/// share of all weights. One candidate = 1.0; two equal ones = 0.5.
+pub fn confidence(costs: &[u64]) -> f64 {
+    let weight = |c: u64| 1.0 / c.max(1) as f64;
+    let total: f64 = costs.iter().map(|&c| weight(c)).sum();
+    costs.first().map_or(0.0, |&c| weight(c) / total)
 }
 
 /// The fix for `typed` (a word as typed, in the language of `model`), if there is a clear one.
@@ -139,8 +149,8 @@ pub fn correct_with(model: &LangModel, map: Option<&KeyMap>, typed: &str, t: &Tu
     }
     found.sort();
     let (cost, fix, edit, pos, likely) = found.first()?.clone();
-    if found.get(1).is_some_and(|second| second.0 < cost * t.margin) {
-        return None; // two fixes look alike: better do nothing
+    if confidence(&found.iter().map(|f| f.0).collect::<Vec<_>>()) < t.min_confidence {
+        return None; // not sure enough which word was meant: better do nothing
     }
     // The vetoes never pick another fix: when the best one is doubtful, nothing is changed.
     if t.likely_only && !likely {
@@ -190,6 +200,14 @@ mod tests {
         assert_eq!(correct(en, Some(&enmap), "Thnaks").as_deref(), Some("Thanks"));
         // another form of a word is not a typo
         assert_eq!(correct(en, Some(&enmap), "breakfastz").as_deref(), None);
+    }
+
+    #[test]
+    fn confidence_share() {
+        assert_eq!(confidence(&[100]), 1.0);
+        assert_eq!(confidence(&[100, 100]), 0.5);
+        assert!((confidence(&[100, 900]) - 0.9).abs() < 1e-9);
+        assert_eq!(confidence(&[]), 0.0);
     }
 
     #[test]
