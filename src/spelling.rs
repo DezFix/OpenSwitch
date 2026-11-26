@@ -148,7 +148,7 @@ pub fn correct_with(model: &LangModel, map: Option<&KeyMap>, typed: &str, t: &Tu
         }
     }
     found.sort();
-    let (cost, fix, edit, pos, likely) = found.first()?.clone();
+    let (_, fix, edit, pos, likely) = found.first()?.clone();
     if confidence(&found.iter().map(|f| f.0).collect::<Vec<_>>()) < t.min_confidence {
         return None; // not sure enough which word was meant: better do nothing
     }
