@@ -39,6 +39,27 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
 
+  installer:
+    # Compiles the installer script on every change, so a broken script shows up before a release.
+    needs: [fmt]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=0.0.0 /O"dist" installer\openswitch.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer
+          path: dist/*.exe
+          retention-days: 7
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [fmt, test]
@@ -59,6 +80,9 @@ jobs:
           New-Item -ItemType Directory dist | Out-Null
           Copy-Item target/release/openswitch.exe dist/openswitch.exe
           Compress-Archive -Path target/release/openswitch.exe, LICENSE, README.md -DestinationPath "dist/OpenSwitch-$v-windows-x64.zip"
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$($v.TrimStart('v'))" /O"dist" installer\openswitch.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $files = Get-ChildItem dist -File
           $files | ForEach-Object {
             "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
@@ -70,6 +94,7 @@ jobs:
           subject-path: |
             dist/openswitch.exe
             dist/*.zip
+            dist/*-setup.exe
       - name: Publish release
         shell: bash
         env:
