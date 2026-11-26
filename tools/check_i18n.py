@@ -20,7 +20,7 @@ src = open('src/i18n.rs', encoding='utf-8').read()
 ru = src[src.index('const RU'):src.index('const UK')]
 keys = set(re.findall(r'\(\s*' + STR + ',', ru))
 used = set(INDIRECT)
-for f in glob.glob('src/*.rs'):
+for f in glob.glob('src/**/*.rs', recursive=True):
     if f.replace('\\', '/').endswith('i18n.rs'):
         continue
     s = open(f, encoding='utf-8').read()
