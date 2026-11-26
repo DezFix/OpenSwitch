@@ -24,6 +24,7 @@ const GREEN: Color32 = Color32::from_rgb(0x2E, 0x9E, 0x4F);
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 enum Section {
     General,
+    Layouts,
     Hotkeys,
     Programs,
     Words,
@@ -31,11 +32,13 @@ enum Section {
 }
 
 impl Section {
-    const ALL: [Section; 5] = [Section::General, Section::Hotkeys, Section::Programs, Section::Words, Section::About];
+    const ALL: [Section; 6] =
+        [Section::General, Section::Layouts, Section::Hotkeys, Section::Programs, Section::Words, Section::About];
 
     fn title(self) -> &'static str {
         match self {
             Section::General => t("General"),
+            Section::Layouts => t("Layouts"),
             Section::Hotkeys => t("Hotkeys"),
             Section::Programs => t("Programs"),
             Section::Words => t("Words"),
@@ -126,6 +129,8 @@ struct SettingsApp {
     new_exe: String,
     new_word: String,
     running: Vec<String>,
+    /// Codes of the installed layouts OpenSwitch can switch between (EN, RU, UA, BY).
+    layout_codes: Vec<&'static str>,
     test_text: String,
     status: Option<(String, bool, Instant)>,
     /// Index into HOTKEYS of the hotkey being recorded.
@@ -144,7 +149,7 @@ impl SettingsApp {
     fn new() -> Self {
         let (s, _) = sys::load_settings();
         let words = load_words();
-        let always = sorted(sys::load_always());
+        let always = sys::always_lines();
         SettingsApp {
             saved: s.clone(),
             s,
@@ -161,6 +166,7 @@ impl SettingsApp {
             new_exe: String::new(),
             new_word: String::new(),
             running: sys::window_exes(),
+            layout_codes: sys::layout_codes(),
             test_text: String::new(),
             status: None,
             recording: None,
@@ -185,7 +191,7 @@ impl SettingsApp {
         self.s = s;
         self.words = load_words();
         self.saved_words = self.words.clone();
-        self.always = sorted(sys::load_always());
+        self.always = sys::always_lines();
         self.saved_always = self.always.clone();
         self.autostart = sys::startup_enabled();
     }
@@ -393,6 +399,38 @@ impl SettingsApp {
             ui.label(label);
             ui.label(RichText::new(hint).small().weak());
             ui.add(egui::TextEdit::multiline(&mut self.test_text).desired_rows(2).desired_width(f32::INFINITY));
+        }
+    }
+
+    fn layouts(&mut self, ui: &mut egui::Ui, p: &mut Page) {
+        p.begin(Section::Layouts);
+        let label = t("Switch between these layouts");
+        let hint = t("Turn a layout off and words are never switched to it automatically (Pause still can).");
+        let names: Vec<String> = self.layout_codes.iter().map(|c| layout_name(c)).collect();
+        let mut texts: Vec<&str> = vec![label, hint, "EN", "RU", "UA", "BY"];
+        texts.extend(names.iter().map(|s| s.as_str()));
+        if !p.row(ui, &texts) {
+            return;
+        }
+        ui.label(RichText::new(hint).small().weak());
+        if self.layout_codes.len() < 2 {
+            ui.add_space(4.0);
+            ui.colored_label(
+                RED,
+                t("Windows has fewer than two layouts OpenSwitch knows (English, Russian, Ukrainian, Belarusian). Add one in Windows settings → Time and language → Language."),
+            );
+        }
+        for (code, name) in self.layout_codes.clone().into_iter().zip(names) {
+            setting_row(ui, &name, None, |ui| {
+                let mut on = !self.s.disabled_layouts.contains(code);
+                if toggle(ui, &mut on).changed() {
+                    if on {
+                        self.s.disabled_layouts.remove(code);
+                    } else {
+                        self.s.disabled_layouts.insert(code.to_string());
+                    }
+                }
+            });
         }
     }
 
@@ -657,6 +695,7 @@ impl SettingsApp {
         let out = egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.set_max_width(ui.available_width() - 12.0);
             self.general(ui, &mut p);
+            self.layouts(ui, &mut p);
             self.hotkeys(ui, &mut p);
             self.programs(ui, &mut p);
             self.words(ui, &mut p);
@@ -700,6 +739,7 @@ impl eframe::App for SettingsApp {
                 self.reload_from_disk();
             }
             self.running = sys::window_exes();
+            self.layout_codes = sys::layout_codes();
         }
         if !focused && self.window_focused {
             self.stop_recording();
@@ -834,7 +874,8 @@ fn removable_list(ui: &mut egui::Ui, items: &[&String], empty: &str) -> Option<S
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
             for item in items {
-                let text = format!("{item}  ×");
+                // learned words carry the target layout: "ghbdsn UA" -> "ghbdsn → UA"
+                let text = format!("{}  ×", item.replacen(' ', " → ", 1));
                 let chip = egui::Button::new(text).corner_radius(10.0);
                 if ui.add(chip).on_hover_text(t("Remove")).clicked() {
                     remove = Some((*item).clone());
@@ -862,6 +903,18 @@ fn key_down(vk: u8) -> bool {
 
 fn is_mouse_or_modifier(vk: u8) -> bool {
     matches!(vk, 0x01 | 0x02 | 0x04..=0x06 | 0x10..=0x12 | 0x5B | 0x5C | 0xA0..=0xA5)
+}
+
+/// "Ukrainian (UA)" for a layout code.
+fn layout_name(code: &str) -> String {
+    let name = match code {
+        "EN" => t("English"),
+        "RU" => t("Russian"),
+        "UA" => t("Ukrainian"),
+        "BY" => t("Belarusian"),
+        _ => code,
+    };
+    format!("{name} ({code})")
 }
 
 fn language_label(setting: &str) -> String {

@@ -4,18 +4,19 @@
 //! Each list: one word per line, sampled by real word frequency (e.g. 30 000 draws from the
 //! top 50 000 words of `wordfreq`).
 use openswitch::detect::Detector;
-use openswitch::layout::{KeyMap, Lang, Layouts};
+use openswitch::layout::{en_ru_ua, ukrainian_map, KeyMap, Lang, Language, Layout, Layouts};
 
-fn ua_layouts() -> Layouts {
-    let mut ru = KeyMap::builtin(Lang::Ru);
-    ru.set(b'S', Some('і'), Some('І'), true);
-    ru.set(0xDD, Some('ї'), Some('Ї'), true);
-    ru.set(0xDE, Some('є'), Some('Є'), true);
-    ru.set(0xC0, Some('\''), Some('₴'), false);
-    Layouts { en: KeyMap::builtin(Lang::En), ru }
+/// English + one Cyrillic layout with the given map and languages.
+fn pair(map: KeyMap, languages: Vec<Language>) -> Layouts {
+    Layouts::new(vec![
+        Layout::new(KeyMap::builtin(Lang::En), vec![Language::En], "EN"),
+        Layout::new(map, languages, "CY"),
+    ])
 }
 
-fn run(name: &str, d: &Detector, path: &str, lang: Lang) {
+/// Words of `path` typed in layout `lang`: they must not switch; typed in English (or, from
+/// English, in `back`) they must.
+fn run(name: &str, d: &Detector, path: &str, lang: Lang, back: Lang) {
     let text = std::fs::read_to_string(path).unwrap();
     let (mut n, mut fp, mut hit) = (0, 0, 0);
     let mut fps = std::collections::HashMap::<String, usize>::new();
@@ -27,7 +28,10 @@ fn run(name: &str, d: &Detector, path: &str, lang: Lang) {
             fp += 1;
             *fps.entry(w.into()).or_default() += 1;
         }
-        if d.check(&keys, lang.other()).switch {
+        let wrong = d.layouts.render(&keys, back);
+        let Some(wrong_keys) = d.layouts.keys_for_text(&wrong, back) else { continue };
+        let v = d.check(&wrong_keys, back);
+        if v.switch && v.to == lang {
             hit += 1
         } else {
             *miss.entry(w.into()).or_default() += 1;
@@ -49,17 +53,18 @@ fn run(name: &str, d: &Detector, path: &str, lang: Lang) {
 
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
+    let (en, ru) = (Lang::En, Lang::Ru);
     let base = Detector::new();
-    run("RU only, ЙЦУКЕН", &base, &a[0], Lang::En);
-    run("RU only, ЙЦУКЕН", &base, &a[1], Lang::Ru);
-    let mut uk = Detector::new();
-    uk.set_ukrainian(true);
-    run("RU+UK, ЙЦУКЕН", &uk, &a[0], Lang::En);
-    run("RU+UK, ЙЦУКЕН", &uk, &a[1], Lang::Ru);
-    uk.layouts = ua_layouts();
-    run("RU+UK, Ukrainian layout", &uk, &a[0], Lang::En);
-    run("RU+UK, Ukrainian layout", &uk, &a[2], Lang::Ru);
-    let mut ruua = Detector::new();
-    ruua.layouts = ua_layouts();
-    run("RU only, Ukrainian layout", &ruua, &a[2], Lang::Ru);
+    run("EN+RU", &base, &a[0], en, ru);
+    run("EN+RU", &base, &a[1], ru, en);
+    let mut ua = Detector::new();
+    ua.layouts = pair(ukrainian_map(), vec![Language::Uk, Language::Ru]);
+    run("EN+UA (UA also Russian)", &ua, &a[0], en, ru);
+    run("EN+UA (UA also Russian)", &ua, &a[2], ru, en);
+    let mut three = Detector::new();
+    three.layouts = en_ru_ua();
+    let uk = Lang(2);
+    run("EN+RU+UA", &three, &a[0], en, ru);
+    run("EN+RU+UA", &three, &a[1], ru, en);
+    run("EN+RU+UA", &three, &a[2], uk, en);
 }

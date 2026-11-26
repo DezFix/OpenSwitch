@@ -3,26 +3,37 @@
 //! ЙЦУКЕН, or maps read from the layouts installed in Windows. Platform independent so it can
 //! be unit-tested anywhere.
 
-/// Which side of the pair a layout is on. `Ru` means "the Cyrillic layout": Russian, Ukrainian
-/// or Belarusian (word detection uses the Russian dictionary for all of them for now).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Lang {
-    En,
-    Ru,
+/// A keyboard layout: index into `Layouts::list`.
+///
+/// With the built-in layouts (and in tests) `Lang::En` is US QWERTY and `Lang::Ru` is Russian
+/// ЙЦУКЕН. On Windows the list holds every installed layout OpenSwitch has a dictionary for
+/// (English, Russian, Ukrainian, Belarusian), so any number of layouts can take part.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Lang(pub u8);
+
+#[allow(non_upper_case_globals)]
+impl Lang {
+    /// First built-in layout: US QWERTY.
+    pub const En: Lang = Lang(0);
+    /// Second built-in layout: Russian ЙЦУКЕН.
+    pub const Ru: Lang = Lang(1);
+
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
 }
 
-impl Lang {
-    pub fn other(self) -> Lang {
-        match self {
-            Lang::En => Lang::Ru,
-            Lang::Ru => Lang::En,
-        }
-    }
-    pub fn code(self) -> &'static str {
-        match self {
-            Lang::En => "EN",
-            Lang::Ru => "RU",
-        }
+/// A language with a dictionary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Language {
+    En,
+    Ru,
+    Uk,
+}
+
+impl Language {
+    pub fn is_latin(self) -> bool {
+        self == Language::En
     }
 }
 
@@ -107,14 +118,11 @@ impl KeyMap {
         KeyMap { chars: [[None; 2]; 256], caps: [false; 256] }
     }
 
-    /// The built-in table for `lang` (US QWERTY / Russian ЙЦУКЕН).
+    /// The built-in table: US QWERTY for `Lang::En`, Russian ЙЦУКЕН for anything else.
     pub fn builtin(lang: Lang) -> KeyMap {
         let mut m = KeyMap::empty();
         for d in KEYS {
-            let (pair, letter) = match lang {
-                Lang::En => (d.en, d.en_letter),
-                Lang::Ru => (d.ru, d.ru_letter),
-            };
+            let (pair, letter) = if lang == Lang::En { (d.en, d.en_letter) } else { (d.ru, d.ru_letter) };
             m.set(d.vk, Some(pair[0]), Some(pair[1]), letter);
         }
         m
@@ -161,32 +169,106 @@ impl KeyMap {
     }
 }
 
-/// The pair of layouts OpenSwitch converts between.
-/// `Lang::Ru` stands for "the Cyrillic layout" (Russian, Ukrainian or Belarusian).
+/// One layout taking part in switching.
+#[derive(Clone)]
+pub struct Layout {
+    pub map: KeyMap,
+    /// Languages a word typed in this layout can be in; the first is the main one.
+    /// A Ukrainian layout also counts as Russian when no Russian layout is installed.
+    pub languages: Vec<Language>,
+    /// Short name for the tray icon and the settings (EN, RU, UA, BY).
+    pub code: String,
+    /// May words be switched *to* this layout automatically?
+    pub target: bool,
+}
+
+impl Layout {
+    pub fn new(map: KeyMap, languages: Vec<Language>, code: &str) -> Layout {
+        Layout { map, languages, code: code.to_string(), target: true }
+    }
+}
+
+/// The layouts OpenSwitch converts between.
 #[derive(Clone)]
 pub struct Layouts {
-    pub en: KeyMap,
-    pub ru: KeyMap,
+    pub list: Vec<Layout>,
+    /// When each layout was last typed in (any clock; larger = more recent). Used to choose
+    /// between layouts that give the same text, e.g. Russian and Ukrainian for «привет».
+    pub recency: Vec<u64>,
 }
 
 impl Default for Layouts {
     fn default() -> Self {
-        Layouts { en: KeyMap::builtin(Lang::En), ru: KeyMap::builtin(Lang::Ru) }
+        Layouts::pair(KeyMap::builtin(Lang::En), KeyMap::builtin(Lang::Ru))
     }
 }
 
 impl Layouts {
+    pub fn new(list: Vec<Layout>) -> Layouts {
+        let recency = vec![0; list.len()];
+        Layouts { list, recency }
+    }
+
+    /// English + Russian with the given maps.
+    pub fn pair(en: KeyMap, ru: KeyMap) -> Layouts {
+        Layouts::new(vec![Layout::new(en, vec![Language::En], "EN"), Layout::new(ru, vec![Language::Ru], "RU")])
+    }
+
+    pub fn len(&self) -> usize {
+        self.list.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.list.is_empty()
+    }
+
+    pub fn all(&self) -> impl Iterator<Item = Lang> {
+        (0..self.list.len() as u8).map(Lang)
+    }
+
+    pub fn get(&self, lang: Lang) -> Option<&Layout> {
+        self.list.get(lang.index())
+    }
+
     pub fn map(&self, lang: Lang) -> &KeyMap {
-        match lang {
-            Lang::En => &self.en,
-            Lang::Ru => &self.ru,
+        &self.list[lang.index()].map
+    }
+
+    pub fn languages(&self, lang: Lang) -> &[Language] {
+        self.get(lang).map_or(&[], |l| &l.languages)
+    }
+
+    pub fn is_latin(&self, lang: Lang) -> bool {
+        self.languages(lang).first().is_some_and(|l| l.is_latin())
+    }
+
+    pub fn code(&self, lang: Lang) -> &str {
+        self.get(lang).map_or("??", |l| &l.code)
+    }
+
+    /// Remember that the user is typing in `lang` now.
+    pub fn touch(&mut self, lang: Lang, now: u64) {
+        if let Some(r) = self.recency.get_mut(lang.index()) {
+            *r = now;
         }
     }
 
-    /// Is this virtual key part of a "word": a letter in one of the two layouts, or one of the
+    /// The most recently used of `candidates` (the first one on a tie).
+    pub fn preferred(&self, candidates: impl Iterator<Item = Lang>) -> Option<Lang> {
+        let mut best: Option<Lang> = None;
+        for c in candidates {
+            let r = self.recency.get(c.index()).copied().unwrap_or(0);
+            if best.is_none_or(|b| r > self.recency.get(b.index()).copied().unwrap_or(0)) {
+                best = Some(c);
+            }
+        }
+        best
+    }
+
+    /// Is this virtual key part of a "word": a letter in one of the layouts, or one of the
     /// punctuation keys that are letters in ЙЦУКЕН (`[ ] ; ' , . \``) or word punctuation (`-`)?
     pub fn is_word_key(&self, vk: u8) -> bool {
-        find(vk).is_some() || self.en.is_letter_key(vk) || self.ru.is_letter_key(vk)
+        find(vk).is_some() || self.list.iter().any(|l| l.map.is_letter_key(vk))
     }
 
     pub fn render_key(&self, ks: KeyStroke, lang: Lang) -> Option<char> {
@@ -210,10 +292,30 @@ impl Layouts {
             .collect()
     }
 
-    /// Convert a selection: detects its layout and flips it to the other one.
+    /// Which layout a piece of text was typed in: Latin text -> an English layout, Cyrillic
+    /// text -> the Cyrillic layout that has all its letters (the most recently used one).
+    pub fn guess_text_lang(&self, text: &str) -> Lang {
+        let cyr = text.chars().filter(|c| ('\u{0400}'..='\u{04FF}').contains(c) && c.is_alphabetic()).count();
+        let lat = text.chars().filter(|c| c.is_ascii_alphabetic()).count();
+        let latin = cyr <= lat;
+        let fits = |l: Lang| text.chars().all(|c| !c.is_alphabetic() || self.map(l).key_for_char(c).is_some());
+        let side = || self.all().filter(move |&l| self.is_latin(l) == latin);
+        self.preferred(side().filter(|&l| fits(l))).or_else(|| self.preferred(side())).unwrap_or(Lang::En)
+    }
+
+    /// The layout a selection typed in `from` is converted to: Latin -> the most recently used
+    /// Cyrillic layout, Cyrillic -> the most recently used English one.
+    pub fn flip_target(&self, from: Lang) -> Lang {
+        let latin = self.is_latin(from);
+        self.preferred(self.all().filter(|&l| l != from && self.is_latin(l) != latin))
+            .or_else(|| self.all().find(|&l| l != from))
+            .unwrap_or(from)
+    }
+
+    /// Convert a selection: detects its layout and converts it to the other side.
     pub fn flip_text(&self, text: &str) -> String {
-        let from = guess_text_lang(text);
-        self.convert_text(text, from, from.other())
+        let from = self.guess_text_lang(text);
+        self.convert_text(text, from, self.flip_target(from))
     }
 
     /// Turn text into keystrokes in `lang` (used by tests and tools).
@@ -248,20 +350,35 @@ pub fn convert_text(text: &str, from: Lang, to: Lang) -> String {
     default_layouts().convert_text(text, from, to)
 }
 
-/// Guess which layout a piece of text was typed in (by counting Cyrillic vs Latin letters).
+/// Built-in layouts: guess which layout a piece of text was typed in.
 pub fn guess_text_lang(text: &str) -> Lang {
-    let cyr = text.chars().filter(|c| ('\u{0400}'..='\u{04FF}').contains(c) && c.is_alphabetic()).count();
-    let lat = text.chars().filter(|c| c.is_ascii_alphabetic()).count();
-    if cyr > lat {
-        Lang::Ru
-    } else {
-        Lang::En
-    }
+    default_layouts().guess_text_lang(text)
 }
 
 /// Built-in layouts: flip a selection to the other layout.
 pub fn flip_text(text: &str) -> String {
     default_layouts().flip_text(text)
+}
+
+/// Standard Ukrainian layout: ЙЦУКЕН with і, ї, є on the keys of ы, ъ, э, ґ on `\` and the
+/// apostrophe on the key of ё.
+pub fn ukrainian_map() -> KeyMap {
+    let mut m = KeyMap::builtin(Lang::Ru);
+    m.set(b'S', Some('і'), Some('І'), true);
+    m.set(0xDD, Some('ї'), Some('Ї'), true);
+    m.set(0xDE, Some('є'), Some('Є'), true);
+    m.set(0xC0, Some('\''), Some('₴'), false);
+    m.set(0xDC, Some('ґ'), Some('Ґ'), true);
+    m
+}
+
+/// English, Russian and Ukrainian (as `Lang(0)`, `Lang(1)`, `Lang(2)`): for tests and tools.
+pub fn en_ru_ua() -> Layouts {
+    Layouts::new(vec![
+        Layout::new(KeyMap::builtin(Lang::En), vec![Language::En], "EN"),
+        Layout::new(KeyMap::builtin(Lang::Ru), vec![Language::Ru], "RU"),
+        Layout::new(ukrainian_map(), vec![Language::Uk], "UA"),
+    ])
 }
 
 /// Built-in layouts: keystrokes for a text (tests and tools).
@@ -300,7 +417,7 @@ mod tests {
         ru.set(0xDE, Some('є'), Some('Є'), true);
         ru.set(0xC0, Some('ґ'), Some('Ґ'), true);
         ru.set(0xE2, Some('ы'), Some('Ы'), true); // VK_OEM_102
-        Layouts { en: KeyMap::builtin(Lang::En), ru }
+        Layouts::pair(KeyMap::builtin(Lang::En), ru)
     }
 
     #[test]

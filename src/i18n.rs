@@ -237,6 +237,14 @@ const RU: &[(&str, &str)] = &[
     ("Always fix", "Всегда исправлять"),
     ("These words are always fixed. Write them the way you type them by mistake (e.g. «ghbdtn»).", "Эти слова исправляются всегда. Пишите их так, как набираете по ошибке (например «ghbdtn»)."),
     ("Words you fixed by hand get here by themselves.", "Слова, которые вы исправили вручную, попадают сюда сами."),
+    ("Layouts", "Раскладки"),
+    ("Switch between these layouts", "Переключать между раскладками"),
+    ("Turn a layout off and words are never switched to it automatically (Pause still can).", "Если выключить раскладку, слова не будут автоматически переводиться на неё (Pause по-прежнему может)."),
+    ("Windows has fewer than two layouts OpenSwitch knows (English, Russian, Ukrainian, Belarusian). Add one in Windows settings → Time and language → Language.", "В Windows меньше двух раскладок, которые знает OpenSwitch (английская, русская, украинская, белорусская). Добавьте раскладку: Параметры Windows → Время и язык → Язык."),
+    ("English", "Английская"),
+    ("Russian", "Русская"),
+    ("Ukrainian", "Украинская"),
+    ("Belarusian", "Белорусская"),
 ];
 
 const UK: &[(&str, &str)] = &[
@@ -361,6 +369,14 @@ const UK: &[(&str, &str)] = &[
     ("Always fix", "Завжди виправляти"),
     ("These words are always fixed. Write them the way you type them by mistake (e.g. «ghbdtn»).", "Ці слова виправляються завжди. Пишіть їх так, як набираєте помилково (наприклад «ghbdtn»)."),
     ("Words you fixed by hand get here by themselves.", "Слова, які ви виправили вручну, потрапляють сюди самі."),
+    ("Layouts", "Розкладки"),
+    ("Switch between these layouts", "Перемикати між розкладками"),
+    ("Turn a layout off and words are never switched to it automatically (Pause still can).", "Якщо вимкнути розкладку, слова не перекладатимуться на неї автоматично (Pause, як і раніше, може)."),
+    ("Windows has fewer than two layouts OpenSwitch knows (English, Russian, Ukrainian, Belarusian). Add one in Windows settings → Time and language → Language.", "У Windows менше двох розкладок, які знає OpenSwitch (англійська, російська, українська, білоруська). Додайте розкладку: Параметри Windows → Час і мова → Мова."),
+    ("English", "Англійська"),
+    ("Russian", "Російська"),
+    ("Ukrainian", "Українська"),
+    ("Belarusian", "Білоруська"),
 ];
 
 #[cfg(test)]

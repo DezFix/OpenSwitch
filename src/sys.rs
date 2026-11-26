@@ -5,9 +5,9 @@
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 
-use openswitch::config::{parse_exceptions, Settings, DEFAULT_FILE};
+use openswitch::config::{parse_always, parse_exceptions, Settings, DEFAULT_FILE};
 use openswitch::i18n;
-use openswitch::layout::{KeyMap, Lang};
+use openswitch::layout::{ukrainian_map, KeyMap, Lang, Language, Layout, Layouts};
 
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::System::Registry::*;
@@ -110,9 +110,23 @@ pub fn save_exceptions(words: &[String]) -> std::io::Result<()> {
     std::fs::write(exceptions_path(), t)
 }
 
-/// Words learned from manual fixes (always.txt; missing file = empty list).
-pub fn load_always() -> std::collections::HashSet<String> {
-    std::fs::read_to_string(always_path()).map(|t| parse_exceptions(&t)).unwrap_or_default()
+/// Words learned from manual fixes (always.txt; missing file = empty list), with the code of
+/// the layout to convert to when known.
+pub fn load_always() -> std::collections::HashMap<String, Option<String>> {
+    std::fs::read_to_string(always_path()).map(|t| parse_always(&t)).unwrap_or_default()
+}
+
+/// always.txt as sorted lines `word` / `word CODE` (for the settings window).
+pub fn always_lines() -> Vec<String> {
+    let mut v: Vec<String> = load_always()
+        .into_iter()
+        .map(|(w, code)| match code {
+            Some(c) => format!("{w} {c}"),
+            None => w,
+        })
+        .collect();
+    v.sort();
+    v
 }
 
 pub fn save_always(words: &[String]) -> std::io::Result<()> {
@@ -125,11 +139,12 @@ pub fn save_always(words: &[String]) -> std::io::Result<()> {
     std::fs::write(always_path(), t)
 }
 
-/// Add or remove one learned word.
-pub fn update_always(word: &str, add: bool) {
-    let mut words: Vec<String> = load_always().into_iter().filter(|w| w != word).collect();
-    if add {
-        words.push(word.to_string());
+/// Add (with the layout code) or remove (`code` None) one learned word.
+pub fn update_always(word: &str, code: Option<&str>) {
+    let mut words: Vec<String> =
+        always_lines().into_iter().filter(|l| l.split_whitespace().next() != Some(word)).collect();
+    if let Some(code) = code {
+        words.push(format!("{word} {code}"));
     }
     words.sort();
     if let Err(e) = save_always(&words) {
@@ -299,19 +314,45 @@ fn primary_lang(hkl: HKL) -> usize {
     (hkl as usize) & 0x3FF
 }
 
-/// Which side of the pair a layout is on. All Cyrillic layouts we support (Russian,
-/// Ukrainian, Belarusian, including customised ones) count as `Lang::Ru`.
-pub fn lang_of_hkl(hkl: HKL) -> Option<Lang> {
+/// The dictionary language of a layout. Belarusian uses the Russian dictionary for now;
+/// layouts of other languages do not take part in switching.
+pub fn language_of_hkl(hkl: HKL) -> Option<Language> {
     match primary_lang(hkl) {
-        0x09 => Some(Lang::En),
-        0x19 | 0x22 | 0x23 => Some(Lang::Ru),
+        0x09 => Some(Language::En),
+        0x19 | 0x23 => Some(Language::Ru),
+        0x22 => Some(Language::Uk),
         _ => None,
     }
 }
 
-/// Is this a Ukrainian layout (the Ukrainian dictionary is then used too)?
-pub fn is_ukrainian(hkl: HKL) -> bool {
-    primary_lang(hkl) == 0x22
+/// The layouts that take part in switching, in Windows' order, with their handles.
+/// A Ukrainian layout also counts as Russian when there is no Russian layout, so Russian
+/// typed in it is not "fixed". Layouts in `disabled` (codes) are never switched to.
+pub fn build_layouts(installed: &[HKL], disabled: &std::collections::HashSet<String>) -> (Layouts, Vec<HKL>) {
+    let has_ru = installed.iter().any(|h| primary_lang(*h) == 0x19);
+    let mut list = Vec::new();
+    let mut hkls = Vec::new();
+    for &hkl in installed {
+        let Some(lang) = language_of_hkl(hkl) else { continue };
+        let mut languages = vec![lang];
+        if lang == Language::Uk && !has_ru {
+            languages.push(Language::Ru);
+        }
+        let code = layout_code(hkl);
+        let mut layout = Layout::new(read_keymap(hkl, lang), languages, code);
+        layout.target = !disabled.contains(code);
+        list.push(layout);
+        hkls.push(hkl);
+    }
+    (Layouts::new(list), hkls)
+}
+
+/// Codes of the installed layouts that can take part in switching (for the settings window).
+pub fn layout_codes() -> Vec<&'static str> {
+    let mut v: Vec<&'static str> =
+        installed_layouts().into_iter().filter(|h| language_of_hkl(*h).is_some()).map(layout_code).collect();
+    v.dedup();
+    v
 }
 
 /// Short code for the tray icon.
@@ -364,7 +405,7 @@ fn key_char(vk: u8, hkl: HKL, shift: bool, caps: bool) -> Option<char> {
 /// Read the key -> character map of an installed layout, so that customised layouts
 /// (e.g. Ukrainian with Russian letters added) convert correctly.
 /// Falls back to the built-in table if the layout looks broken.
-pub fn read_keymap(hkl: HKL, lang: Lang) -> KeyMap {
+pub fn read_keymap(hkl: HKL, lang: Language) -> KeyMap {
     let mut m = KeyMap::empty();
     for &vk in MAPPED_KEYS {
         let normal = key_char(vk, hkl, false, false);
@@ -375,7 +416,11 @@ pub fn read_keymap(hkl: HKL, lang: Lang) -> KeyMap {
     }
     if m.letter_count() < 20 {
         log::warn!("layout {:#x}: only {} letter keys, using the built-in table", hkl as usize, m.letter_count());
-        return KeyMap::builtin(lang);
+        return match lang {
+            Language::En => KeyMap::builtin(Lang::En),
+            Language::Ru => KeyMap::builtin(Lang::Ru),
+            Language::Uk => ukrainian_map(),
+        };
     }
     m
 }
@@ -401,10 +446,6 @@ pub fn focus_target(fg: HWND) -> (HWND, u32) {
         }
         (fg, tid)
     }
-}
-
-pub fn current_lang(fg: HWND) -> Option<Lang> {
-    lang_of_hkl(current_hkl(fg))
 }
 
 pub fn installed_layouts() -> Vec<HKL> {

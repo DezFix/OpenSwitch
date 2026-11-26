@@ -170,6 +170,8 @@ pub struct Settings {
     pub language: String,
     /// Executables (lowercase file names) where auto switching is disabled.
     pub exclude: HashSet<String>,
+    /// Layouts (codes like RU, UA) words are never switched *to* automatically.
+    pub disabled_layouts: HashSet<String>,
 }
 
 impl Default for Settings {
@@ -190,6 +192,7 @@ impl Default for Settings {
             hotkey_toggle_auto: Hotkey { vk: VK_PAUSE, alt: true, ..Hotkey::NONE },
             language: "system".into(),
             exclude: DEFAULT_EXCLUDE.iter().map(|s| s.to_string()).collect(),
+            disabled_layouts: HashSet::new(),
         }
     }
 }
@@ -252,6 +255,9 @@ hotkey_convert_selection = Shift+Pause
 # Включить/выключить автопереключение
 hotkey_toggle_auto = Alt+Pause
 
+# Раскладки, на которые не переключать автоматически (коды через запятую: EN, RU, UA, BY)
+disabled_layouts =
+
 # Программы, в которых автопереключение не работает (ручное исправление работает).
 # Имена exe через запятую.
 exclude = cmd.exe, powershell.exe, pwsh.exe, windowsterminal.exe, conhost.exe, putty.exe, mintty.exe, keepass.exe, keepassxc.exe
@@ -303,6 +309,11 @@ impl Settings {
                 "hotkey_convert_word" => Hotkey::parse(v).map(|h| s.hotkey_convert_word = h).is_some(),
                 "hotkey_convert_selection" => Hotkey::parse(v).map(|h| s.hotkey_convert_selection = h).is_some(),
                 "hotkey_toggle_auto" => Hotkey::parse(v).map(|h| s.hotkey_toggle_auto = h).is_some(),
+                "disabled_layouts" => {
+                    s.disabled_layouts =
+                        v.split([',', ';']).map(|x| x.trim().to_uppercase()).filter(|x| !x.is_empty()).collect();
+                    true
+                }
                 "exclude" => {
                     s.exclude =
                         v.split([',', ';']).map(|x| x.trim().to_lowercase()).filter(|x| !x.is_empty()).collect();
@@ -343,6 +354,11 @@ impl Settings {
             ("hotkey_convert_selection", self.hotkey_convert_selection.to_string()),
             ("hotkey_toggle_auto", self.hotkey_toggle_auto.to_string()),
             ("exclude", ex.join(", ")),
+            ("disabled_layouts", {
+                let mut d: Vec<&str> = self.disabled_layouts.iter().map(|s| s.as_str()).collect();
+                d.sort();
+                d.join(", ")
+            }),
         ] {
             t = Settings::set_in_text(&t, k, &v);
         }
@@ -374,6 +390,20 @@ impl Settings {
     }
 }
 
+/// Learned words (always.txt): `word` or `word CODE` per line (CODE = layout to convert to,
+/// e.g. UA), `#` comments.
+pub fn parse_always(text: &str) -> std::collections::HashMap<String, Option<String>> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .filter_map(|l| {
+            let mut parts = l.split_whitespace();
+            let word = parts.next()?.to_lowercase();
+            Some((word, parts.next().map(str::to_uppercase)))
+        })
+        .collect()
+}
+
 /// User exception list: one word per line, `#` comments.
 pub fn parse_exceptions(text: &str) -> HashSet<String> {
     text.lines().map(|l| l.trim().to_lowercase()).filter(|l| !l.is_empty() && !l.starts_with('#')).collect()
@@ -392,6 +422,14 @@ mod tests {
         assert_eq!(Settings::parse(&uk).0.language, "uk");
         let bad = Settings::set_in_text(DEFAULT_FILE, "language", "de");
         assert!(!Settings::parse(&bad).1.is_empty());
+    }
+
+    #[test]
+    fn always_list() {
+        let m = parse_always("# comment\nghbdtn\nGhbdsn ua\n\n");
+        assert_eq!(m.get("ghbdtn"), Some(&None));
+        assert_eq!(m.get("ghbdsn"), Some(&Some("UA".to_string())));
+        assert_eq!(m.len(), 2);
     }
 
     #[test]

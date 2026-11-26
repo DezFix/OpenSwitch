@@ -50,8 +50,9 @@ pub enum Action {
     ToggleAuto,
     /// Remember a word that must never be auto-converted again (persist it).
     AddException(String),
-    /// Remember a word that must always be converted (learned from a manual fix).
-    Learn(String),
+    /// Remember a word that must always be converted (learned from a manual fix):
+    /// the word as typed and the code of the layout it was converted to.
+    Learn(String, String),
     /// Drop a learned word again (the user put it back).
     Forget(String),
 }
@@ -88,6 +89,9 @@ struct Word {
     learn_pending: bool,
     /// Learned (added to `always_switch`) from this word.
     learned: bool,
+    /// Layouts a manual fix cycles through: the typed one first, then the others from the
+    /// most to the least plausible (filled on the first manual fix).
+    cycle: Vec<Lang>,
 }
 
 /// Word typed with CapsLock on by accident: Shift held for the first letter only, so it came
@@ -338,6 +342,7 @@ impl Engine {
         if self.detector.layouts.is_word_key(vk) {
             let ks = KeyStroke { vk, shift, caps: self.caps };
             let after_switch = self.settings.careful_after_switch && self.prev_lang.is_some_and(|p| p != lang);
+            self.detector.layouts.touch(lang, now);
             match &mut self.word {
                 Some(w) if w.trailing == 0 && w.shown_lang == lang => w.keys.push(ks),
                 _ => {
@@ -352,6 +357,7 @@ impl Engine {
                         after_switch,
                         learn_pending: false,
                         learned: false,
+                        cycle: Vec::new(),
                     })
                 }
             }
@@ -380,8 +386,9 @@ impl Engine {
         if w.trailing == 0 && !w.manual && !w.keys.is_empty() {
             let from = w.shown_lang;
             let care = if w.after_switch { CAREFUL } else { 1.0 };
-            let switch = auto_on && self.detector.check_careful(&w.keys, from, care).switch;
-            let to = if switch { from.other() } else { from };
+            let verdict = if auto_on { Some(self.detector.check_careful(&w.keys, from, care)) } else { None };
+            let switch = verdict.as_ref().is_some_and(|v| v.switch);
+            let to = verdict.filter(|v| v.switch).map_or(from, |v| v.to);
             let caps_fix = caps_on && caps_accident(&w.keys, self.detector.layouts.map(to));
             if switch || caps_fix {
                 let n = self.detector.layouts.render(&w.keys, from).chars().count();
@@ -417,8 +424,9 @@ impl Engine {
                 w.learn_pending = false;
                 w.learned = true;
                 let word = self.detector.layouts.render(&w.keys, w.typed_lang).to_lowercase();
-                self.detector.always_switch.insert(word.clone());
-                out.actions.push(Action::Learn(word));
+                let code = self.detector.layouts.code(w.shown_lang).to_string();
+                self.detector.always_switch.insert(word.clone(), Some(code.clone()));
+                out.actions.push(Action::Learn(word, code));
             }
         }
         if vk == VK_SPACE {
@@ -465,7 +473,20 @@ impl Engine {
             return vec![];
         }
         let from = w.shown_lang;
-        let to = from.other();
+        let to = if w.auto {
+            // Undo an automatic fix.
+            w.typed_lang
+        } else {
+            if w.cycle.is_empty() {
+                w.cycle.push(w.typed_lang);
+                w.cycle.extend(self.detector.ranked_alternatives(&w.keys, w.typed_lang));
+            }
+            let i = w.cycle.iter().position(|&l| l == from).unwrap_or(0);
+            w.cycle[(i + 1) % w.cycle.len()]
+        };
+        if to == from {
+            return vec![];
+        }
         let n = self.detector.layouts.render(&w.keys, from).chars().count() + w.trailing;
         let mut text = self.detector.layouts.render(&w.keys, to);
         text.push_str(&" ".repeat(w.trailing));
@@ -474,7 +495,7 @@ impl Engine {
         let word = self.detector.layouts.render(&w.keys, w.typed_lang).to_lowercase();
         if w.auto && reverting {
             // The user reverted an automatic correction: never touch this word again.
-            if self.detector.always_switch.remove(&word) {
+            if self.detector.always_switch.remove(&word).is_some() {
                 actions.push(Action::Forget(word.clone()));
             }
             self.detector.never_switch.insert(word.clone());
@@ -483,7 +504,7 @@ impl Engine {
         } else if reverting {
             // Fixed by hand and put back: nothing to learn.
             w.learn_pending = false;
-            if w.learned && self.detector.always_switch.remove(&word) {
+            if w.learned && self.detector.always_switch.remove(&word).is_some() {
                 actions.push(Action::Forget(word));
             }
             w.learned = false;
@@ -495,8 +516,9 @@ impl Engine {
             // Fixed by hand: the detector missed it. Learn it once the word is finished.
             if w.trailing > 0 {
                 w.learned = true;
-                self.detector.always_switch.insert(word.clone());
-                actions.push(Action::Learn(word));
+                let code = self.detector.layouts.code(to).to_string();
+                self.detector.always_switch.insert(word.clone(), Some(code.clone()));
+                actions.push(Action::Learn(word, code));
             } else {
                 w.learn_pending = true;
             }
@@ -687,7 +709,7 @@ mod tests {
         // fixed by hand after the space -> learned right away
         let o = e.on_key(crate::config::VK_PAUSE, true, t + 50, Some(Lang::En), true);
         assert_eq!(o.actions[1], Action::Type("руку ".into()));
-        assert_eq!(o.actions.last(), Some(&Action::Learn("here".into())));
+        assert_eq!(o.actions.last(), Some(&Action::Learn("here".into(), "RU".into())));
         // next time it is fixed automatically
         t += 2000;
         e.reset();
@@ -708,10 +730,10 @@ mod tests {
         typ(&mut e, "here", Lang::En, &mut t);
         // Pause before the space: nothing learned yet (the word may go on)
         let o = e.on_key(crate::config::VK_PAUSE, true, t, Some(Lang::En), true);
-        assert!(!o.actions.iter().any(|a| matches!(a, Action::Learn(_))));
+        assert!(!o.actions.iter().any(|a| matches!(a, Action::Learn(..))));
         let o = space(&mut e, Lang::Ru, &mut t);
         assert!(!o.swallow);
-        assert_eq!(o.actions, vec![Action::Learn("here".into())]);
+        assert_eq!(o.actions, vec![Action::Learn("here".into(), "RU".into())]);
 
         // converted and converted back: nothing learned
         let mut e = Engine::new(Detector::new(), Settings::default());
@@ -725,7 +747,29 @@ mod tests {
         typ(&mut e, "here", Lang::En, &mut t);
         space(&mut e, Lang::En, &mut t);
         let o = e.on_key(crate::config::VK_PAUSE, true, t + 50, Some(Lang::En), true);
-        assert!(!o.actions.iter().any(|a| matches!(a, Action::Learn(_))));
+        assert!(!o.actions.iter().any(|a| matches!(a, Action::Learn(..))));
+    }
+
+    #[test]
+    fn three_layouts_manual_cycle() {
+        let mut d = Detector::new();
+        d.layouts = crate::layout::en_ru_ua();
+        let mut e = Engine::new(d, Settings { learn_manual: false, ..Settings::default() });
+        let mut t = 0;
+        // "here": a real English word, kept; Pause cycles RU «руку» (UA gives the same text,
+        // so it is skipped) and back to English
+        typ(&mut e, "here", Lang::En, &mut t);
+        assert!(!space(&mut e, Lang::En, &mut t).swallow);
+        let o = e.on_key(crate::config::VK_PAUSE, true, t + 10, Some(Lang::En), true);
+        assert_eq!(o.actions[1], Action::Type("руку ".into()));
+        let o = e.on_key(crate::config::VK_PAUSE, true, t + 20, Some(Lang::Ru), true);
+        assert_eq!(o.actions[1], Action::Type("here ".into()));
+        // "ghbdsn" is fixed to Ukrainian, and Pause undoes it
+        t += 2000;
+        typ(&mut e, "ghbdsn", Lang::En, &mut t);
+        let o = space(&mut e, Lang::En, &mut t);
+        assert_eq!(o.actions[1], Action::Type("привіт".into()));
+        assert_eq!(o.actions[3], Action::SwitchLayout(Lang(2)));
     }
 
     #[test]
@@ -757,13 +801,15 @@ mod tests {
 
     #[test]
     fn cyrillic_side_custom_layout() {
-        use crate::layout::{KeyMap, Layouts};
+        use crate::layout::KeyMap;
         // A Ukrainian layout with і on S: typing "love" there must still become English.
         let mut d = Detector::new();
-        d.set_ukrainian(true);
         let mut ru = KeyMap::builtin(Lang::Ru);
         ru.set(b'S', Some('і'), Some('І'), true);
-        d.layouts = Layouts { en: KeyMap::builtin(Lang::En), ru };
+        d.layouts = crate::layout::Layouts::new(vec![
+            crate::layout::Layout::new(KeyMap::builtin(Lang::En), vec![crate::layout::Language::En], "EN"),
+            crate::layout::Layout::new(ru, vec![crate::layout::Language::Uk, crate::layout::Language::Ru], "UA"),
+        ]);
         let mut e = Engine::new(d, Settings::default());
         let mut t = 0;
         for k in e.detector.layouts.keys_for_text("дщму", Lang::Ru).unwrap() {
