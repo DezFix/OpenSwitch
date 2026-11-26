@@ -1,4 +1,4 @@
-; SPDX-License-Identifier: GPL-3.0-or-later
+﻿; SPDX-License-Identifier: GPL-3.0-or-later
 ; OpenSwitch installer (Inno Setup 6). Built by CI for every release:
 ;   ISCC.exe /DAppVersion=0.7.0 /O"dist" installer\openswitch.iss
 ; Expects target\release\openswitch.exe to be built.
