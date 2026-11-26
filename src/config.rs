@@ -162,6 +162,10 @@ pub struct Settings {
     pub careful_after_switch: bool,
     /// Remember words fixed by hand (Pause / Shift Shift) and fix them automatically next time.
     pub learn_manual: bool,
+    /// Capital letter at the start of a sentence, English "i" -> "I".
+    pub capitalize: bool,
+    /// Remove the space typed before , . ! ? ("привет , как" -> "привет, как").
+    pub fix_space: bool,
     pub sensitivity: f32,
     pub hotkey_convert_word: Hotkey,
     pub hotkey_convert_selection: Hotkey,
@@ -186,6 +190,8 @@ impl Default for Settings {
             skip_code: true,
             careful_after_switch: true,
             learn_manual: true,
+            capitalize: true,
+            fix_space: true,
             sensitivity: 1.0,
             hotkey_convert_word: Hotkey { vk: VK_PAUSE, ..Hotkey::NONE },
             hotkey_convert_selection: Hotkey { vk: VK_PAUSE, shift: true, ..Hotkey::NONE },
@@ -239,6 +245,12 @@ careful_after_switch = true
 
 # Запоминать слова, исправленные вручную (Pause), и дальше исправлять их сразу (always.txt)
 learn_manual = true
+
+# Заглавная буква в начале предложения (после . ! ? и Enter), английское i -> I
+capitalize = true
+
+# Убирать пробел перед знаком препинания: «привет , как» -> «привет, как»
+fix_space = true
 
 # Чувствительность автопереключения: 0.5 (осторожно) ... 2.0 (агрессивно)
 sensitivity = 1.0
@@ -296,6 +308,8 @@ impl Settings {
                 "skip_code" => parse_bool(v).map(|b| s.skip_code = b).is_some(),
                 "careful_after_switch" => parse_bool(v).map(|b| s.careful_after_switch = b).is_some(),
                 "learn_manual" => parse_bool(v).map(|b| s.learn_manual = b).is_some(),
+                "capitalize" => parse_bool(v).map(|b| s.capitalize = b).is_some(),
+                "fix_space" => parse_bool(v).map(|b| s.fix_space = b).is_some(),
                 "sensitivity" => v.parse::<f32>().ok().filter(|x| *x > 0.0).map(|x| s.sensitivity = x).is_some(),
                 "language" => {
                     let code = v.to_ascii_lowercase();
@@ -348,6 +362,8 @@ impl Settings {
             ("skip_code", b(self.skip_code).to_string()),
             ("careful_after_switch", b(self.careful_after_switch).to_string()),
             ("learn_manual", b(self.learn_manual).to_string()),
+            ("capitalize", b(self.capitalize).to_string()),
+            ("fix_space", b(self.fix_space).to_string()),
             ("sensitivity", format!("{:.2}", self.sensitivity)),
             ("language", self.language.clone()),
             ("hotkey_convert_word", self.hotkey_convert_word.to_string()),

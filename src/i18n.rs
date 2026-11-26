@@ -245,6 +245,10 @@ const RU: &[(&str, &str)] = &[
     ("Russian", "Русская"),
     ("Ukrainian", "Украинская"),
     ("Belarusian", "Белорусская"),
+    ("Capital letter at the start of a sentence", "Заглавная буква в начале предложения"),
+    ("After . ! ? and Enter; English i becomes I", "После . ! ? и Enter; английское i станет I"),
+    ("Remove the space before , . ! ?", "Убирать пробел перед , . ! ?"),
+    ("«привет , как» becomes «привет, как»", "«привет , как» станет «привет, как»"),
 ];
 
 const UK: &[(&str, &str)] = &[
@@ -377,6 +381,10 @@ const UK: &[(&str, &str)] = &[
     ("Russian", "Російська"),
     ("Ukrainian", "Українська"),
     ("Belarusian", "Білоруська"),
+    ("Capital letter at the start of a sentence", "Велика літера на початку речення"),
+    ("After . ! ? and Enter; English i becomes I", "Після . ! ? та Enter; англійське i стане I"),
+    ("Remove the space before , . ! ?", "Прибирати пробіл перед , . ! ?"),
+    ("«привет , как» becomes «привет, как»", "«привіт , як» стане «привіт, як»"),
 ];
 
 #[cfg(test)]

@@ -344,6 +344,17 @@ impl SettingsApp {
             setting_row(ui, label, Some(hint), |ui| toggle(ui, &mut self.s.fix_caps));
         }
 
+        let (label, hint) =
+            (t("Capital letter at the start of a sentence"), t("After . ! ? and Enter; English i becomes I"));
+        if p.row(ui, &[label, hint, "text"]) {
+            setting_row(ui, label, Some(hint), |ui| toggle(ui, &mut self.s.capitalize));
+        }
+
+        let (label, hint) = (t("Remove the space before , . ! ?"), t("«привет , как» becomes «привет, как»"));
+        if p.row(ui, &[label, hint, "text"]) {
+            setting_row(ui, label, Some(hint), |ui| toggle(ui, &mut self.s.fix_space));
+        }
+
         let label = t("Start OpenSwitch with Windows");
         if p.row(ui, &[label, "autostart"]) {
             setting_row(ui, label, None, |ui| {

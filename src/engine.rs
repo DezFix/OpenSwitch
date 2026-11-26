@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 
 use crate::config::Settings;
-use crate::detect::Detector;
+use crate::detect::{looks_like_code, Detector};
 use crate::layout::{KeyMap, KeyStroke, Lang};
 
 pub const VK_BACK: u8 = 0x08;
@@ -33,6 +33,31 @@ const CAREFUL: f32 = 0.75;
 const CAPS_FIX_MIN: usize = 3;
 /// Shortest word learned from a manual fix.
 const LEARN_MIN: usize = 2;
+/// Characters that end a sentence.
+const SENTENCE_END: [char; 4] = ['.', '!', '?', '…'];
+/// Abbreviations with a dot that do not end a sentence (besides single letters: «г.», «т.»,
+/// and dotted ones: «т.е.», «e.g.»).
+const ABBREVIATIONS: &[&str] = &[
+    "др", "пр", "см", "стр", "ул", "руб", "коп", "млн", "млрд", "тыс", "им", "напр", "ст", "обл", "гр", "проф", "акад",
+    "св", "кв", "рис", "табл", "вул", "див", "грн", "etc", "vs", "mr", "mrs", "ms", "dr", "jr", "sr", "no", "fig",
+    "approx",
+];
+
+/// Does a word end a sentence? «дела.», «ура!», «правда?» do; «т.», «т.е.», «ул.», «etc.» don't.
+fn ends_sentence(word: &str) -> bool {
+    let Some(head) = word.strip_suffix('.') else {
+        return word.ends_with(['!', '?', '…']);
+    };
+    if head.ends_with('.') {
+        return true; // "..." and "?." count as an end
+    }
+    let lower = head.to_lowercase();
+    let letters = lower.chars().filter(|c| c.is_alphabetic()).count();
+    !(letters <= 1 || lower.contains('.') || ABBREVIATIONS.contains(&lower.as_str()))
+}
+
+/// English words that are always written with a capital I.
+const ENGLISH_I: [&str; 5] = ["i", "i'm", "i'll", "i've", "i'd"];
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
@@ -92,6 +117,8 @@ struct Word {
     /// Layouts a manual fix cycles through: the typed one first, then the others from the
     /// most to the least plausible (filled on the first manual fix).
     cycle: Vec<Lang>,
+    /// The word starts a sentence (it came after . ! ? or Enter).
+    sentence_start: bool,
 }
 
 /// Word typed with CapsLock on by accident: Shift held for the first letter only, so it came
@@ -101,6 +128,31 @@ fn caps_accident(keys: &[KeyStroke], map: &KeyMap) -> bool {
         && keys.iter().all(|k| k.caps && map.caps_sensitive(k.vk))
         && keys[0].shift
         && keys[1..].iter().all(|k| !k.shift)
+}
+
+/// Should this word get a capital first letter? At the start of a sentence, if it is all
+/// small letters (not iPhone, eBay, links or code); English "i", "i'm"... always.
+fn needs_capital(text: &str, sentence_start: bool, latin: bool) -> bool {
+    let Some(first) = text.chars().next() else { return false };
+    if !first.is_lowercase() {
+        return false;
+    }
+    if latin && ENGLISH_I.contains(&text) {
+        return true;
+    }
+    sentence_start && !text.chars().any(char::is_uppercase) && !(latin && looks_like_code(text))
+}
+
+/// Make the first key type a capital letter. False if it cannot (not a letter key).
+fn capitalize_keys(keys: &mut [KeyStroke], map: &KeyMap) -> bool {
+    let Some(k) = keys.first_mut() else { return false };
+    let upper = KeyStroke { vk: k.vk, shift: if map.caps_sensitive(k.vk) { !k.caps } else { true }, caps: k.caps };
+    if map.render_key(upper).is_some_and(char::is_uppercase) {
+        *k = upper;
+        true
+    } else {
+        false
+    }
 }
 
 /// The same keys as if CapsLock had been off: capital first letter, the rest small.
@@ -124,6 +176,9 @@ pub struct Engine {
     last_shift_tap: Option<u64>,
     /// Layout of the last finished word (None after a click or a window change).
     prev_lang: Option<Lang>,
+    /// The next word starts a sentence: the last thing typed was . ! ? (and spaces) or Enter.
+    /// False when unknown (after a click, a window change, arrows...).
+    sentence_start: bool,
     /// Words whose automatic fix was undone with Backspace once in this session; a second
     /// undo makes the word an exception.
     undone: HashSet<String>,
@@ -146,6 +201,7 @@ impl Engine {
             shift_clean: false,
             last_shift_tap: None,
             prev_lang: None,
+            sentence_start: false,
             undone: HashSet::new(),
         }
     }
@@ -153,6 +209,7 @@ impl Engine {
     pub fn reset(&mut self) {
         self.word = None;
         self.prev_lang = None;
+        self.sentence_start = false;
         self.last_shift_tap = None;
         self.shift_clean = false;
     }
@@ -326,6 +383,9 @@ impl Engine {
                     return Output { swallow: true, actions };
                 }
             }
+            if self.word.is_none() {
+                self.sentence_start = false;
+            }
             if let Some(w) = &mut self.word {
                 if w.trailing > 0 {
                     w.trailing -= 1;
@@ -339,8 +399,15 @@ impl Engine {
             return Output::pass();
         }
 
+        if let Some(out) = self.space_before_punctuation(vk, shift, lang, auto_allowed) {
+            return out;
+        }
+
         if self.detector.layouts.is_word_key(vk) {
             let ks = KeyStroke { vk, shift, caps: self.caps };
+            let sentence_start = self.sentence_start;
+            let ch = self.detector.layouts.render_key(ks, lang);
+            self.sentence_start = ch.is_some_and(|c| SENTENCE_END.contains(&c));
             let after_switch = self.settings.careful_after_switch && self.prev_lang.is_some_and(|p| p != lang);
             self.detector.layouts.touch(lang, now);
             match &mut self.word {
@@ -358,6 +425,7 @@ impl Engine {
                         learn_pending: false,
                         learned: false,
                         cycle: Vec::new(),
+                        sentence_start,
                     })
                 }
             }
@@ -368,12 +436,15 @@ impl Engine {
             let out = self.boundary(vk, now, auto_allowed);
             if vk == VK_RETURN {
                 self.word = None;
+                self.sentence_start = true;
             }
             return out;
         }
 
         // Any other key (digits, arrows, Tab, Delete, Esc, F-keys, numpad...) ends tracking.
         self.word = None;
+        self.sentence_start =
+            vk == VK_RETURN || self.punctuation(vk, shift, lang).is_some_and(|c| c == '!' || c == '?');
         Output::pass()
     }
 
@@ -390,11 +461,19 @@ impl Engine {
             let switch = verdict.as_ref().is_some_and(|v| v.switch);
             let to = verdict.filter(|v| v.switch).map_or(from, |v| v.to);
             let caps_fix = caps_on && caps_accident(&w.keys, self.detector.layouts.map(to));
-            if switch || caps_fix {
-                let n = self.detector.layouts.render(&w.keys, from).chars().count();
-                if caps_fix {
-                    let fixed = without_caps(&w.keys);
-                    w.original = Some(std::mem::replace(&mut w.keys, fixed));
+            let n = self.detector.layouts.render(&w.keys, from).chars().count();
+            let mut keys = if caps_fix { without_caps(&w.keys) } else { w.keys.clone() };
+            let capital = self.settings.capitalize
+                && auto_allowed
+                && needs_capital(
+                    &self.detector.layouts.render(&keys, to),
+                    w.sentence_start,
+                    self.detector.layouts.is_latin(to),
+                )
+                && capitalize_keys(&mut keys, self.detector.layouts.map(to));
+            if switch || caps_fix || capital {
+                if caps_fix || capital {
+                    w.original = Some(std::mem::replace(&mut w.keys, keys));
                 }
                 let mut actions = vec![
                     Action::Backspace(n),
@@ -414,12 +493,14 @@ impl Engine {
                 w.auto = true;
                 w.trailing = if vk == VK_SPACE { 1 } else { 0 };
                 self.prev_lang = Some(to);
+                self.sentence_start = ends_sentence(&self.detector.layouts.render(&w.keys, to));
                 return Output { swallow: true, actions };
             }
         }
         let mut out = Output::pass();
         if w.trailing == 0 {
             self.prev_lang = Some(w.shown_lang);
+            self.sentence_start = ends_sentence(&self.detector.layouts.render(&w.keys, w.shown_lang));
             if w.learn_pending {
                 w.learn_pending = false;
                 w.learned = true;
@@ -433,6 +514,43 @@ impl Engine {
             w.trailing += 1;
         }
         out
+    }
+
+    /// The punctuation mark a key types in `lang`, if any. Word keys are read from the layout;
+    /// on the digit row only the marks that are the same in all supported layouts are known.
+    fn punctuation(&self, vk: u8, shift: bool, lang: Lang) -> Option<char> {
+        let c = if self.detector.layouts.is_word_key(vk) {
+            self.detector.layouts.render_key(KeyStroke { vk, shift, caps: false }, lang)?
+        } else {
+            match (vk, shift, self.detector.layouts.is_latin(lang)) {
+                (b'1', true, _) => '!',
+                (b'7', true, false) => '?',
+                _ => return None,
+            }
+        };
+        matches!(c, ',' | '.' | '!' | '?').then_some(c)
+    }
+
+    /// "привет ," -> "привет,": a mark typed right after the space(s) that followed a word.
+    /// Only when the key is no letter in any layout (in English «,» and «.» are Russian «б»
+    /// and «ю», the start of the next word typed in the wrong layout).
+    fn space_before_punctuation(&mut self, vk: u8, shift: bool, lang: Lang, auto_allowed: bool) -> Option<Output> {
+        if !self.settings.fix_space || !auto_allowed {
+            return None;
+        }
+        let spaces = self.word.as_ref().filter(|w| w.trailing > 0)?.trailing;
+        let c = self.punctuation(vk, shift, lang)?;
+        let layouts = &self.detector.layouts;
+        let letter_somewhere = layouts.is_word_key(vk)
+            && layouts
+                .all()
+                .any(|l| layouts.render_key(KeyStroke { vk, shift, caps: false }, l).is_some_and(char::is_alphabetic));
+        if letter_somewhere {
+            return None;
+        }
+        self.word = None;
+        self.sentence_start = SENTENCE_END.contains(&c);
+        Some(Output { swallow: true, actions: vec![Action::Backspace(spaces), Action::Type(c.to_string())] })
     }
 
     /// Backspace right after an automatic fix (word + the space that triggered it): put the
@@ -770,6 +888,111 @@ mod tests {
         let o = space(&mut e, Lang::En, &mut t);
         assert_eq!(o.actions[1], Action::Type("привіт".into()));
         assert_eq!(o.actions[3], Action::SwitchLayout(Lang(2)));
+    }
+
+    fn enter(e: &mut Engine, lang: Lang, t: &mut u64) -> Output {
+        *t += 50;
+        e.on_key(VK_RETURN, true, *t, Some(lang), true)
+    }
+
+    #[test]
+    fn capital_letter_at_sentence_start() {
+        let mut e = Engine::new(Detector::new(), Settings::default());
+        let mut t = 0;
+        // nothing known before the first word: left alone
+        typ(&mut e, "привет.", Lang::Ru, &mut t);
+        assert!(!space(&mut e, Lang::Ru, &mut t).swallow);
+        typ(&mut e, "как", Lang::Ru, &mut t);
+        let o = space(&mut e, Lang::Ru, &mut t);
+        assert_eq!(o.actions, vec![Action::Backspace(3), Action::Type("Как".into()), Action::Tap(VK_SPACE)]);
+        // the middle of the sentence stays small
+        typ(&mut e, "дела", Lang::Ru, &mut t);
+        assert!(!space(&mut e, Lang::Ru, &mut t).swallow);
+        // Backspace right away undoes the capital
+        typ(&mut e, "дела.", Lang::Ru, &mut t);
+        space(&mut e, Lang::Ru, &mut t);
+        typ(&mut e, "ну", Lang::Ru, &mut t);
+        assert_eq!(space(&mut e, Lang::Ru, &mut t).actions[1], Action::Type("Ну".into()));
+        let o = e.on_key(VK_BACK, true, t + 10, Some(Lang::Ru), true);
+        assert_eq!(o.actions[1], Action::Type("ну".into()));
+        // after Enter, together with a layout fix
+        e.reset();
+        enter(&mut e, Lang::En, &mut t);
+        typ(&mut e, "ghbdtn", Lang::En, &mut t);
+        assert_eq!(space(&mut e, Lang::En, &mut t).actions[1], Action::Type("Привет".into()));
+        // iPhone, links and words that are capitalised already are left alone
+        // (after a pause: right after a fix the engine waits for the layout switch)
+        t += 2000;
+        for w in ["iPhone", "github.com", "Hello"] {
+            enter(&mut e, Lang::En, &mut t);
+            typ(&mut e, w, Lang::En, &mut t);
+            let o = space(&mut e, Lang::En, &mut t);
+            assert!(!o.swallow, "{w} {:?}", o.actions);
+        }
+        // option off
+        let mut e = Engine::new(Detector::new(), Settings { capitalize: false, ..Settings::default() });
+        enter(&mut e, Lang::Ru, &mut t);
+        typ(&mut e, "как", Lang::Ru, &mut t);
+        assert!(!space(&mut e, Lang::Ru, &mut t).swallow);
+    }
+
+    #[test]
+    fn abbreviations_do_not_end_sentences() {
+        for w in ["дела.", "ура!", "правда?", "ну...", "Hello."] {
+            assert!(ends_sentence(w), "{w}");
+        }
+        for w in ["т.", "д.", "г.", "т.е.", "ул.", "стр.", "e.g.", "etc.", "Mr.", "привет", "так,"] {
+            assert!(!ends_sentence(w), "{w}");
+        }
+        let mut e = Engine::new(Detector::new(), Settings::default());
+        let mut t = 0;
+        typ(&mut e, "т.е.", Lang::Ru, &mut t);
+        space(&mut e, Lang::Ru, &mut t);
+        typ(&mut e, "дом", Lang::Ru, &mut t);
+        assert!(!space(&mut e, Lang::Ru, &mut t).swallow);
+    }
+
+    #[test]
+    fn english_i() {
+        let mut e = Engine::new(Detector::new(), Settings::default());
+        let mut t = 0;
+        typ(&mut e, "and", Lang::En, &mut t);
+        space(&mut e, Lang::En, &mut t);
+        for (w, want) in [("i", "I"), ("i'm", "I'm")] {
+            typ(&mut e, w, Lang::En, &mut t);
+            assert_eq!(space(&mut e, Lang::En, &mut t).actions[1], Action::Type(want.into()));
+        }
+    }
+
+    #[test]
+    fn space_before_punctuation() {
+        let mut e = Engine::new(Detector::new(), Settings::default());
+        let mut t = 0;
+        typ(&mut e, "привет", Lang::Ru, &mut t);
+        space(&mut e, Lang::Ru, &mut t);
+        let comma = keys_for_text(",", Lang::Ru).unwrap()[0];
+        e.on_key(VK_LSHIFT, true, t, Some(Lang::Ru), true);
+        let o = e.on_key(comma.vk, true, t, Some(Lang::Ru), true);
+        e.on_key(VK_LSHIFT, false, t, Some(Lang::Ru), true);
+        assert!(o.swallow);
+        assert_eq!(o.actions, vec![Action::Backspace(1), Action::Type(",".into())]);
+        // "!" on the digit row
+        typ(&mut e, "ура", Lang::Ru, &mut t);
+        space(&mut e, Lang::Ru, &mut t);
+        e.on_key(VK_LSHIFT, true, t, Some(Lang::Ru), true);
+        let o = e.on_key(b'1', true, t, Some(Lang::Ru), true);
+        assert_eq!(o.actions, vec![Action::Backspace(1), Action::Type("!".into())]);
+        e.on_key(VK_LSHIFT, false, t, Some(Lang::Ru), true);
+        // English "," is the Russian «б»: may start the next word, left alone
+        typ(&mut e, "hello", Lang::En, &mut t);
+        space(&mut e, Lang::En, &mut t);
+        assert!(!e.on_key(0xBC, true, t, Some(Lang::En), true).swallow);
+        // smileys: " :)" stays
+        typ(&mut e, "ок", Lang::Ru, &mut t);
+        space(&mut e, Lang::Ru, &mut t);
+        e.on_key(VK_LSHIFT, true, t, Some(Lang::Ru), true);
+        assert!(!e.on_key(b'6', true, t, Some(Lang::Ru), true).swallow);
+        e.on_key(VK_LSHIFT, false, t, Some(Lang::Ru), true);
     }
 
     #[test]
