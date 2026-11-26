@@ -688,6 +688,24 @@ mod tests {
         }
     }
 
+    /// A settings.ini written by OpenSwitch 0.3.0 still reads without warnings, keeps its
+    /// values and gets the new options with their defaults when saved again.
+    #[test]
+    fn settings_from_0_3_0() {
+        let old = include_str!("../tests/fixtures/settings-0.3.0.ini")
+            .replace("auto_switch = true", "auto_switch = false")
+            .replace("exclude = cmd.exe,", "exclude = code.exe, cmd.exe,");
+        let (s, w) = Settings::parse(&old);
+        assert!(w.is_empty(), "{w:?}");
+        assert!(!s.auto_switch);
+        assert_eq!(s.app_rule("code.exe"), AppRule::Manual);
+        assert!(!s.setup_done); // the first-run guide shows once after the update
+        let saved = Settings::set_in_text(&old, "setup_done", "true");
+        let (again, w) = Settings::parse(&Settings::parse(&saved).0.to_text());
+        assert!(w.is_empty(), "{w:?}");
+        assert!(!again.auto_switch && again.setup_done && again.skip_passwords && !again.check_updates);
+    }
+
     #[test]
     fn app_rules() {
         let mut s = Settings::default();
