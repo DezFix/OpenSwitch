@@ -5,6 +5,8 @@
 ## [Unreleased]
 
 ### Добавлено
+- Манифесты для **winget** и **Scoop** собираются в каждом релизе (`tools/gen_manifests.py`,
+  `winget-manifests.zip` и `openswitch.json`); порядок выпуска и отправки — `docs/RELEASING.md`.
 - **Установщик** (`installer/openswitch.iss`, Inno Setup 6) рядом с portable-архивом: установка
   без прав администратора для текущего пользователя (или для всех), ярлык в «Пуске», автозапуск
   по желанию, языки EN/RU/UK. Перед установкой и удалением работающий OpenSwitch закрывается;
