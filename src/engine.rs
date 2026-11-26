@@ -2,9 +2,11 @@
 //! Platform-independent typing engine. The Windows hook feeds it raw key events and
 //! performs the returned actions (SendInput, layout switch, ...).
 
+use std::collections::HashSet;
+
 use crate::config::Settings;
 use crate::detect::Detector;
-use crate::layout::{KeyStroke, Lang};
+use crate::layout::{KeyMap, KeyStroke, Lang};
 
 pub const VK_BACK: u8 = 0x08;
 pub const VK_RETURN: u8 = 0x0D;
@@ -25,6 +27,10 @@ pub const VK_RMENU: u8 = 0xA5;
 const DOUBLE_SHIFT_MS: u64 = 400;
 const SHIFT_TAP_MAX_MS: u64 = 300;
 const FORCED_LAYOUT_MS: u64 = 1000;
+/// Sensitivity factor for the first word after the user switched the layout on purpose.
+const CAREFUL: f32 = 0.75;
+/// Shortest word for the CapsLock fix (пРИВЕТ -> Привет).
+const CAPS_FIX_MIN: usize = 3;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
@@ -65,8 +71,27 @@ struct Word {
     shown_lang: Lang,
     /// Spaces typed after the word.
     trailing: usize,
+    /// Changed automatically (other layout and/or CapsLock fix).
     auto: bool,
     manual: bool,
+    /// Keys as typed, before the CapsLock fix changed them.
+    original: Option<Vec<KeyStroke>>,
+    /// The user switched the layout themselves right before this word.
+    after_switch: bool,
+}
+
+/// Word typed with CapsLock on by accident: Shift held for the first letter only, so it came
+/// out as пРИВЕТ. All keys must be letters in `map`.
+fn caps_accident(keys: &[KeyStroke], map: &KeyMap) -> bool {
+    keys.len() >= CAPS_FIX_MIN
+        && keys.iter().all(|k| k.caps && map.caps_sensitive(k.vk))
+        && keys[0].shift
+        && keys[1..].iter().all(|k| !k.shift)
+}
+
+/// The same keys as if CapsLock had been off: capital first letter, the rest small.
+fn without_caps(keys: &[KeyStroke]) -> Vec<KeyStroke> {
+    keys.iter().enumerate().map(|(i, k)| KeyStroke { vk: k.vk, shift: i == 0, caps: false }).collect()
 }
 
 pub struct Engine {
@@ -83,6 +108,11 @@ pub struct Engine {
     shift_down_at: Option<u64>,
     shift_clean: bool,
     last_shift_tap: Option<u64>,
+    /// Layout of the last finished word (None after a click or a window change).
+    prev_lang: Option<Lang>,
+    /// Words whose automatic fix was undone with Backspace once in this session; a second
+    /// undo makes the word an exception.
+    undone: HashSet<String>,
 }
 
 impl Engine {
@@ -101,11 +131,14 @@ impl Engine {
             shift_down_at: None,
             shift_clean: false,
             last_shift_tap: None,
+            prev_lang: None,
+            undone: HashSet::new(),
         }
     }
 
     pub fn reset(&mut self) {
         self.word = None;
+        self.prev_lang = None;
         self.last_shift_tap = None;
         self.shift_clean = false;
     }
@@ -274,6 +307,11 @@ impl Engine {
         };
 
         if vk == VK_BACK {
+            if self.settings.undo_backspace {
+                if let Some(actions) = self.undo_auto(now) {
+                    return Output { swallow: true, actions };
+                }
+            }
             if let Some(w) = &mut self.word {
                 if w.trailing > 0 {
                     w.trailing -= 1;
@@ -289,6 +327,7 @@ impl Engine {
 
         if self.detector.layouts.is_word_key(vk) {
             let ks = KeyStroke { vk, shift, caps: self.caps };
+            let after_switch = self.settings.careful_after_switch && self.prev_lang.is_some_and(|p| p != lang);
             match &mut self.word {
                 Some(w) if w.trailing == 0 && w.shown_lang == lang => w.keys.push(ks),
                 _ => {
@@ -299,6 +338,8 @@ impl Engine {
                         trailing: 0,
                         auto: false,
                         manual: false,
+                        original: None,
+                        after_switch,
                     })
                 }
             }
@@ -320,34 +361,80 @@ impl Engine {
 
     fn boundary(&mut self, vk: u8, now: u64, auto_allowed: bool) -> Output {
         let auto_on = self.settings.auto_switch && auto_allowed;
+        let caps_on = self.settings.fix_caps && auto_allowed;
         let Some(w) = &mut self.word else {
             return Output::pass();
         };
-        if w.trailing == 0 && !w.manual && auto_on && !w.keys.is_empty() {
-            let v = self.detector.check(&w.keys, w.shown_lang);
-            if v.switch {
-                let from = w.shown_lang;
-                let to = from.other();
+        if w.trailing == 0 && !w.manual && !w.keys.is_empty() {
+            let from = w.shown_lang;
+            let care = if w.after_switch { CAREFUL } else { 1.0 };
+            let switch = auto_on && self.detector.check_careful(&w.keys, from, care).switch;
+            let to = if switch { from.other() } else { from };
+            let caps_fix = caps_on && caps_accident(&w.keys, self.detector.layouts.map(to));
+            if switch || caps_fix {
                 let n = self.detector.layouts.render(&w.keys, from).chars().count();
+                if caps_fix {
+                    let fixed = without_caps(&w.keys);
+                    w.original = Some(std::mem::replace(&mut w.keys, fixed));
+                }
+                let mut actions = vec![
+                    Action::Backspace(n),
+                    Action::Type(self.detector.layouts.render(&w.keys, to)),
+                    Action::Tap(vk),
+                ];
+                if switch {
+                    actions.push(Action::SwitchLayout(to));
+                    self.forced = Some((to, now));
+                }
+                if caps_fix {
+                    // Injected keys are not seen by the hook: track the new state here.
+                    actions.push(Action::Tap(VK_CAPITAL));
+                    self.caps = false;
+                }
                 w.shown_lang = to;
                 w.auto = true;
                 w.trailing = if vk == VK_SPACE { 1 } else { 0 };
-                self.forced = Some((to, now));
-                return Output {
-                    swallow: true,
-                    actions: vec![
-                        Action::Backspace(n),
-                        Action::Type(self.detector.layouts.render(&w.keys, to)),
-                        Action::Tap(vk),
-                        Action::SwitchLayout(to),
-                    ],
-                };
+                self.prev_lang = Some(to);
+                return Output { swallow: true, actions };
             }
+        }
+        if w.trailing == 0 {
+            self.prev_lang = Some(w.shown_lang);
         }
         if vk == VK_SPACE {
             w.trailing += 1;
         }
         Output::pass()
+    }
+
+    /// Backspace right after an automatic fix (word + the space that triggered it): put the
+    /// word back as typed, in the layout it was typed in. Undoing the same word twice in a
+    /// session makes it an exception.
+    fn undo_auto(&mut self, now: u64) -> Option<Vec<Action>> {
+        let w = self.word.as_mut()?;
+        if !w.auto || w.manual || w.trailing != 1 {
+            return None;
+        }
+        let layouts = &self.detector.layouts;
+        let n = layouts.render(&w.keys, w.shown_lang).chars().count() + 1;
+        let keys = w.original.take().unwrap_or_else(|| w.keys.clone());
+        let mut actions = vec![Action::Backspace(n), Action::Type(layouts.render(&keys, w.typed_lang))];
+        if w.shown_lang != w.typed_lang {
+            actions.push(Action::SwitchLayout(w.typed_lang));
+            self.forced = Some((w.typed_lang, now));
+            let word = layouts.render(&keys, w.typed_lang).to_lowercase();
+            if !self.undone.insert(word.clone()) {
+                self.detector.never_switch.insert(word.clone());
+                actions.push(Action::AddException(word));
+            }
+        }
+        w.keys = keys;
+        w.shown_lang = w.typed_lang;
+        w.trailing = 0;
+        w.auto = false;
+        w.manual = true;
+        self.prev_lang = Some(w.typed_lang);
+        Some(actions)
     }
 
     fn convert_word(&mut self, _lang: Option<Lang>, now: u64) -> Vec<Action> {
@@ -372,6 +459,10 @@ impl Engine {
         }
         w.shown_lang = to;
         w.manual = true;
+        w.original = None;
+        if w.trailing > 0 {
+            self.prev_lang = Some(to);
+        }
         self.forced = Some((to, now));
         actions
     }
@@ -426,6 +517,120 @@ mod tests {
         t += 2000;
         typ(&mut e, "ghbdtn", Lang::En, &mut t);
         assert!(!e.on_key(VK_SPACE, true, t, Some(Lang::En), true).swallow);
+    }
+
+    fn space(e: &mut Engine, lang: Lang, t: &mut u64) -> Output {
+        *t += 50;
+        e.on_key(VK_SPACE, true, *t, Some(lang), true)
+    }
+
+    #[test]
+    fn backspace_undo() {
+        let mut e = Engine::new(Detector::new(), Settings::default());
+        let mut t = 0;
+        typ(&mut e, "ghbdtn", Lang::En, &mut t);
+        assert!(space(&mut e, Lang::En, &mut t).swallow);
+        // Backspace right away: the word comes back as typed, layout back to English
+        let o = e.on_key(VK_BACK, true, t + 50, Some(Lang::Ru), true);
+        assert!(o.swallow);
+        assert_eq!(
+            o.actions,
+            vec![Action::Backspace(7), Action::Type("ghbdtn".into()), Action::SwitchLayout(Lang::En)]
+        );
+        // a space now does not fix it again
+        assert!(!space(&mut e, Lang::En, &mut t).swallow);
+        // second undo of the same word in a session -> exception
+        t += 2000;
+        typ(&mut e, "ghbdtn", Lang::En, &mut t);
+        assert!(space(&mut e, Lang::En, &mut t).swallow);
+        let o = e.on_key(VK_BACK, true, t + 50, Some(Lang::Ru), true);
+        assert_eq!(o.actions.last(), Some(&Action::AddException("ghbdtn".into())));
+    }
+
+    #[test]
+    fn backspace_later_is_plain_backspace() {
+        let mut e = Engine::new(Detector::new(), Settings::default());
+        let mut t = 0;
+        typ(&mut e, "ghbdtn", Lang::En, &mut t);
+        space(&mut e, Lang::En, &mut t);
+        space(&mut e, Lang::Ru, &mut t); // two spaces: Backspace only deletes a space
+        assert!(!e.on_key(VK_BACK, true, t + 50, Some(Lang::Ru), true).swallow);
+        // and with the option off nothing is undone
+        let mut e = Engine::new(Detector::new(), Settings { undo_backspace: false, ..Settings::default() });
+        typ(&mut e, "ghbdtn", Lang::En, &mut t);
+        space(&mut e, Lang::En, &mut t);
+        assert!(!e.on_key(VK_BACK, true, t + 50, Some(Lang::Ru), true).swallow);
+    }
+
+    fn typ_caps(e: &mut Engine, text: &str, lang: Lang, t: &mut u64) {
+        // CapsLock on, Shift for the first letter: the user meant "Text"
+        e.on_key(VK_CAPITAL, true, *t, Some(lang), true);
+        e.on_key(VK_CAPITAL, false, *t, Some(lang), true);
+        for (i, k) in keys_for_text(text, lang).unwrap().into_iter().enumerate() {
+            if i == 0 {
+                e.on_key(VK_LSHIFT, true, *t, Some(lang), true);
+            }
+            e.on_key(k.vk, true, *t, Some(lang), true);
+            e.on_key(k.vk, false, *t, Some(lang), true);
+            if i == 0 {
+                e.on_key(VK_LSHIFT, false, *t, Some(lang), true);
+            }
+            *t += 50;
+        }
+    }
+
+    #[test]
+    fn caps_lock_fix() {
+        let mut e = Engine::new(Detector::new(), Settings::default());
+        let mut t = 0;
+        typ_caps(&mut e, "привет", Lang::Ru, &mut t);
+        let o = space(&mut e, Lang::Ru, &mut t);
+        assert!(o.swallow);
+        assert_eq!(
+            o.actions,
+            vec![Action::Backspace(6), Action::Type("Привет".into()), Action::Tap(VK_SPACE), Action::Tap(VK_CAPITAL)]
+        );
+        assert!(!e.caps);
+        // Backspace undo brings back what was typed
+        let o = e.on_key(VK_BACK, true, t + 50, Some(Lang::Ru), true);
+        assert_eq!(o.actions[1], Action::Type("пРИВЕТ".into()));
+
+        // CapsLock accident and wrong layout at once: gHBDTN -> Привет
+        let mut e = Engine::new(Detector::new(), Settings::default());
+        typ_caps(&mut e, "ghbdtn", Lang::En, &mut t);
+        let o = space(&mut e, Lang::En, &mut t);
+        assert_eq!(o.actions[1], Action::Type("Привет".into()));
+        assert!(o.actions.contains(&Action::SwitchLayout(Lang::Ru)));
+        assert!(o.actions.contains(&Action::Tap(VK_CAPITAL)));
+
+        // Real all-caps words are left alone
+        let mut e = Engine::new(Detector::new(), Settings::default());
+        e.on_key(VK_CAPITAL, true, t, Some(Lang::Ru), true);
+        typ(&mut e, "привет", Lang::Ru, &mut t);
+        assert!(!space(&mut e, Lang::Ru, &mut t).swallow);
+    }
+
+    #[test]
+    fn careful_after_manual_switch() {
+        let mut e = Engine::new(Detector::new(), Settings::default());
+        let mut t = 0;
+        typ(&mut e, "привет", Lang::Ru, &mut t);
+        space(&mut e, Lang::Ru, &mut t);
+        // the user switches to English and types a word
+        t += 1500;
+        typ(&mut e, "rust", Lang::En, &mut t);
+        assert!(e.word.as_ref().unwrap().after_switch);
+        assert!(!space(&mut e, Lang::En, &mut t).swallow);
+        // obvious mistakes are still fixed right after a switch
+        typ(&mut e, "привет", Lang::Ru, &mut t);
+        space(&mut e, Lang::Ru, &mut t);
+        t += 1500;
+        typ(&mut e, "ghbdtn", Lang::En, &mut t);
+        assert!(space(&mut e, Lang::En, &mut t).swallow);
+        // a click (reset) forgets the previous word
+        e.reset();
+        typ(&mut e, "hello", Lang::En, &mut t);
+        assert!(!e.word.as_ref().unwrap().after_switch);
     }
 
     #[test]

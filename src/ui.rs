@@ -315,6 +315,16 @@ impl SettingsApp {
             });
         }
 
+        let (label, hint) = (t("Undo a fix with Backspace"), t("Backspace right after a fix brings the word back"));
+        if p.row(ui, &[label, hint]) {
+            setting_row(ui, label, Some(hint), |ui| toggle(ui, &mut self.s.undo_backspace));
+        }
+
+        let (label, hint) = (t("Fix accidental CapsLock"), t("пРИВЕТ becomes Привет and CapsLock turns off"));
+        if p.row(ui, &[label, hint, "caps"]) {
+            setting_row(ui, label, Some(hint), |ui| toggle(ui, &mut self.s.fix_caps));
+        }
+
         let label = t("Start OpenSwitch with Windows");
         if p.row(ui, &[label, "autostart"]) {
             setting_row(ui, label, None, |ui| {
@@ -333,6 +343,17 @@ impl SettingsApp {
             let label = t("Fix one-letter words (d — в, z — я, ш — i)");
             if p.row(ui, &[label]) {
                 setting_row(ui, label, None, |ui| toggle(ui, &mut this.s.single_letters));
+            }
+            let (label, hint) = (t("Don't touch links, e-mail and code"), t("github.com, readme.md, getValue"));
+            if p.row(ui, &[label, hint, "url"]) {
+                setting_row(ui, label, Some(hint), |ui| toggle(ui, &mut this.s.skip_code));
+            }
+            let (label, hint) = (
+                t("Be careful after you switch the layout yourself"),
+                t("The first word after a manual switch is fixed only when it is clearly wrong"),
+            );
+            if p.row(ui, &[label, hint]) {
+                setting_row(ui, label, Some(hint), |ui| toggle(ui, &mut this.s.careful_after_switch));
             }
             let label = t("Exact sensitivity");
             if p.row(ui, &[label, t("Sensitivity")]) {

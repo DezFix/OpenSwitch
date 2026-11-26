@@ -743,6 +743,7 @@ fn reload() -> Vec<String> {
     with_app(|app| {
         app.engine.detector.sensitivity = settings.sensitivity;
         app.engine.detector.single_letters = settings.single_letters;
+        app.engine.detector.skip_code = settings.skip_code;
         app.engine.detector.never_switch = exceptions;
         app.engine.settings = settings;
         app.last_fg = null_mut();
@@ -915,6 +916,7 @@ pub fn run() {
         detector.never_switch = sys::load_exceptions();
         detector.sensitivity = settings.sensitivity;
         detector.single_letters = settings.single_letters;
+        detector.skip_code = settings.skip_code;
         let mut engine = Engine::new(detector, settings);
         engine.caps = (GetKeyState(VK_CAPITAL as i32) & 1) != 0;
 

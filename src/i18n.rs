@@ -224,6 +224,14 @@ const RU: &[(&str, &str)] = &[
     ("Changes applied", "Изменения применены"),
     ("Not saved: two commands have the same keys.", "Не сохранено: у двух команд одинаковые клавиши."),
     ("OpenSwitch is not running, so these settings don't work yet.", "OpenSwitch не запущен, поэтому настройки пока не действуют."),
+    ("Undo a fix with Backspace", "Отменять исправление клавишей Backspace"),
+    ("Backspace right after a fix brings the word back", "Backspace сразу после исправления возвращает слово как было"),
+    ("Fix accidental CapsLock", "Исправлять случайный CapsLock"),
+    ("пРИВЕТ becomes Привет and CapsLock turns off", "пРИВЕТ станет Привет, а CapsLock выключится"),
+    ("Don't touch links, e-mail and code", "Не трогать ссылки, почту и код"),
+    ("github.com, readme.md, getValue", "github.com, readme.md, getValue"),
+    ("Be careful after you switch the layout yourself", "Осторожнее после ручного переключения раскладки"),
+    ("The first word after a manual switch is fixed only when it is clearly wrong", "Первое слово после ручного переключения исправляется, только если ошибка очевидна"),
 ];
 
 const UK: &[(&str, &str)] = &[
@@ -335,6 +343,14 @@ const UK: &[(&str, &str)] = &[
     ("Changes applied", "Зміни застосовано"),
     ("Not saved: two commands have the same keys.", "Не збережено: дві команди мають однакові клавіші."),
     ("OpenSwitch is not running, so these settings don't work yet.", "OpenSwitch не запущено, тому налаштування поки не діють."),
+    ("Undo a fix with Backspace", "Скасовувати виправлення клавішею Backspace"),
+    ("Backspace right after a fix brings the word back", "Backspace одразу після виправлення повертає слово як було"),
+    ("Fix accidental CapsLock", "Виправляти випадковий CapsLock"),
+    ("пРИВЕТ becomes Привет and CapsLock turns off", "пРИВІТ стане Привіт, а CapsLock вимкнеться"),
+    ("Don't touch links, e-mail and code", "Не чіпати посилання, пошту та код"),
+    ("github.com, readme.md, getValue", "github.com, readme.md, getValue"),
+    ("Be careful after you switch the layout yourself", "Обережніше після ручного перемикання розкладки"),
+    ("The first word after a manual switch is fixed only when it is clearly wrong", "Перше слово після ручного перемикання виправляється, лише якщо помилка очевидна"),
 ];
 
 #[cfg(test)]

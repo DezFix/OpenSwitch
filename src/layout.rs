@@ -154,6 +154,11 @@ impl KeyMap {
     fn is_letter_key(&self, vk: u8) -> bool {
         self.chars[vk as usize][0].is_some_and(char::is_alphabetic)
     }
+
+    /// Does CapsLock change this key (i.e. it is a letter in this layout)?
+    pub fn caps_sensitive(&self, vk: u8) -> bool {
+        self.caps[vk as usize]
+    }
 }
 
 /// The pair of layouts OpenSwitch converts between.

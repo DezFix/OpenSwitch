@@ -142,6 +142,38 @@ fn has_edge_junk(raw: &str, cur: Lang) -> bool {
     has_letter && (first.is_some_and(|c| any_edge(c) || lead_only(c)) || last.is_some_and(any_edge))
 }
 
+/// File extensions and top-level domains: `name.ext` / `site.tld` typed in the English layout
+/// is a file or a link, not Russian text with «ю» in it.
+const CODE_SUFFIXES: &[&str] = &[
+    "com", "net", "org", "ru", "ua", "by", "kz", "io", "dev", "app", "me", "co", "uk", "de", "eu", "info", "gov",
+    "edu", "rs", "py", "js", "ts", "md", "txt", "exe", "dll", "html", "htm", "css", "json", "xml", "yml", "yaml",
+    "toml", "ini", "cfg", "log", "pdf", "doc", "docx", "xls", "xlsx", "png", "jpg", "jpeg", "gif", "svg", "zip", "rar",
+    "mp3", "mp4", "csv", "sh", "bat", "cpp", "go", "java", "php", "sql",
+];
+
+/// Does a word typed in the English layout look like a link, an e-mail/file name or a code
+/// identifier? Those are left alone (`skip_code`).
+pub fn looks_like_code(raw: &str) -> bool {
+    let lower = raw.to_ascii_lowercase();
+    if lower.contains("://") || lower.starts_with("www.") {
+        return true;
+    }
+    // name.ext / site.tld (at least two characters before the dot)
+    if let Some((head, ext)) = lower.rsplit_once('.') {
+        let head_ok = head.chars().filter(|c| c.is_ascii_alphanumeric()).count() >= 2
+            && head.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '/'));
+        if head_ok && CODE_SUFFIXES.contains(&ext) {
+            return true;
+        }
+    }
+    // camelCase: a capital after a small letter, followed by more small letters (getValue).
+    // "gHBDTN" (CapsLock by accident) has no small letters after the capitals.
+    let c: Vec<char> = raw.chars().collect();
+    (1..c.len()).any(|i| {
+        c[i - 1].is_ascii_lowercase() && c[i].is_ascii_uppercase() && c[i + 1..].iter().any(char::is_ascii_lowercase)
+    })
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Verdict {
     pub switch: bool,
@@ -161,6 +193,8 @@ pub struct Detector {
     pub sensitivity: f32,
     /// Convert one-letter words like "d" -> "в".
     pub single_letters: bool,
+    /// Leave links, file names and camelCase identifiers typed in English alone.
+    pub skip_code: bool,
     /// Key -> character maps of the two layouts.
     pub layouts: Layouts,
 }
@@ -180,6 +214,7 @@ impl Detector {
             never_switch: HashSet::new(),
             sensitivity: 1.0,
             single_letters: true,
+            skip_code: true,
             layouts: Layouts::default(),
         }
     }
@@ -211,9 +246,15 @@ impl Detector {
     /// a Cyrillic word is kept if it is plausible in either language, and English typing is
     /// converted if the result is a word in either language.
     pub fn check(&self, keys: &[KeyStroke], cur: Lang) -> Verdict {
-        let ru = self.check_with(keys, cur, &self.ru);
+        self.check_careful(keys, cur, 1.0)
+    }
+
+    /// Like `check`, with the sensitivity multiplied by `care` (< 1 = switch less readily,
+    /// e.g. right after the user switched the layout on purpose).
+    pub fn check_careful(&self, keys: &[KeyStroke], cur: Lang, care: f32) -> Verdict {
+        let ru = self.check_with(keys, cur, &self.ru, care);
         let Some(uk) = &self.uk else { return ru };
-        let uk = self.check_with(keys, cur, uk);
+        let uk = self.check_with(keys, cur, uk, care);
         match cur {
             Lang::Ru if ru.switch && !uk.switch => uk,
             Lang::Ru => ru,
@@ -222,7 +263,7 @@ impl Detector {
         }
     }
 
-    fn check_with(&self, keys: &[KeyStroke], cur: Lang, cyr: &LangModel) -> Verdict {
+    fn check_with(&self, keys: &[KeyStroke], cur: Lang, cyr: &LangModel, care: f32) -> Verdict {
         let model = |l: Lang| match l {
             Lang::En => &self.en,
             Lang::Ru => cyr,
@@ -235,6 +276,10 @@ impl Detector {
         let key = raw_cur.to_lowercase();
         if self.never_switch.contains(&key) {
             v.reason = "user exception";
+            return v;
+        }
+        if self.skip_code && cur == Lang::En && looks_like_code(&raw_cur) {
+            v.reason = "link or code";
             return v;
         }
         let mc = model(cur);
@@ -270,7 +315,7 @@ impl Detector {
         let ra = ma.rank(&wa);
         let sa = ma.score(&wa);
         let wc = if has_edge_junk(&raw_cur, cur) { None } else { mc.clean(&raw_cur) };
-        let s = self.sensitivity;
+        let s = self.sensitivity * care;
 
         let Some(wc) = wc else {
             // Current rendering contains punctuation inside the word (e.g. "j;bl'v").
@@ -370,6 +415,53 @@ mod tests {
         for w in ["привет", "как", "дела", "не", "я", "сеть", "программа", "ФСБ"] {
             assert!(!sw(&d, w, Lang::Ru), "{w}");
         }
+    }
+
+    #[test]
+    fn links_and_code() {
+        let d = Detector::new();
+        for w in ["github.com", "https://example", "www.google", "readme.md", "main.rs", "getValue", "isEmpty"] {
+            assert!(looks_like_code(w), "{w}");
+            assert!(!sw(&d, w, Lang::En), "{w}");
+        }
+        // Russian words with «ю», «б», «ж» typed in English are still fixed
+        for w in ["k.,jdm", "c.lf", "rk.d", "gk.c", "ghbdtn", "gHBDTN", "Ghbdtn"] {
+            assert!(!looks_like_code(w), "{w}");
+        }
+        assert!(sw(&d, "c.lf", Lang::En));
+    }
+
+    #[test]
+    fn code_rule_spares_russian_words() {
+        // No common Russian word may look like code when typed in the English layout.
+        let d = Detector::new();
+        let hits: Vec<&str> = RU_WORDS
+            .lines()
+            .take(30_000)
+            .filter(|w| {
+                let keys = keys_for_text(w, Lang::Ru);
+                keys.is_some_and(|k| looks_like_code(&d.layouts.render(&k, Lang::En)))
+            })
+            .collect();
+        assert!(hits.is_empty(), "{hits:?}");
+        let uk = ukrainian();
+        let hits: Vec<&str> = UK_WORDS
+            .lines()
+            .take(30_000)
+            .filter(|w| {
+                let keys = uk.layouts.keys_for_text(w, Lang::Ru);
+                keys.is_some_and(|k| looks_like_code(&uk.layouts.render(&k, Lang::En)))
+            })
+            .collect();
+        assert!(hits.is_empty(), "{hits:?}");
+    }
+
+    #[test]
+    fn careful_check() {
+        let d = Detector::new();
+        let keys = keys_for_text("ghbdtn", Lang::En).unwrap();
+        // a clear case is fixed even when careful
+        assert!(d.check_careful(&keys, Lang::En, 0.75).switch);
     }
 
     fn ukrainian() -> Detector {

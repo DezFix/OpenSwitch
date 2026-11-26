@@ -152,6 +152,14 @@ pub struct Settings {
     pub single_letters: bool,
     pub switch_on_enter: bool,
     pub double_shift: bool,
+    /// Backspace right after an automatic fix puts the word back as it was typed.
+    pub undo_backspace: bool,
+    /// Fix words typed with CapsLock on by accident (пРИВЕТ -> Привет) and turn CapsLock off.
+    pub fix_caps: bool,
+    /// Leave links, e-mail addresses, file names and camelCase identifiers alone.
+    pub skip_code: bool,
+    /// Be more careful with the first word after the user switched the layout themselves.
+    pub careful_after_switch: bool,
     pub sensitivity: f32,
     pub hotkey_convert_word: Hotkey,
     pub hotkey_convert_selection: Hotkey,
@@ -169,6 +177,10 @@ impl Default for Settings {
             single_letters: true,
             switch_on_enter: true,
             double_shift: true,
+            undo_backspace: true,
+            fix_caps: true,
+            skip_code: true,
+            careful_after_switch: true,
             sensitivity: 1.0,
             hotkey_convert_word: Hotkey { vk: VK_PAUSE, ..Hotkey::NONE },
             hotkey_convert_selection: Hotkey { vk: VK_PAUSE, shift: true, ..Hotkey::NONE },
@@ -206,6 +218,18 @@ switch_on_enter = true
 
 # Двойное нажатие Shift = исправить последнее слово (удобно на ноутбуках без Pause)
 double_shift = true
+
+# Backspace сразу после автоисправления возвращает слово как было набрано
+undo_backspace = true
+
+# Исправлять случайно нажатый CapsLock (пРИВЕТ -> Привет) и выключать его
+fix_caps = true
+
+# Не трогать ссылки, почту, имена файлов и идентификаторы вида camelCase
+skip_code = true
+
+# Осторожнее с первым словом после того, как вы сами переключили раскладку
+careful_after_switch = true
 
 # Чувствительность автопереключения: 0.5 (осторожно) ... 2.0 (агрессивно)
 sensitivity = 1.0
@@ -255,6 +279,10 @@ impl Settings {
                 "single_letters" => parse_bool(v).map(|b| s.single_letters = b).is_some(),
                 "switch_on_enter" => parse_bool(v).map(|b| s.switch_on_enter = b).is_some(),
                 "double_shift" => parse_bool(v).map(|b| s.double_shift = b).is_some(),
+                "undo_backspace" => parse_bool(v).map(|b| s.undo_backspace = b).is_some(),
+                "fix_caps" => parse_bool(v).map(|b| s.fix_caps = b).is_some(),
+                "skip_code" => parse_bool(v).map(|b| s.skip_code = b).is_some(),
+                "careful_after_switch" => parse_bool(v).map(|b| s.careful_after_switch = b).is_some(),
                 "sensitivity" => v.parse::<f32>().ok().filter(|x| *x > 0.0).map(|x| s.sensitivity = x).is_some(),
                 "language" => {
                     let code = v.to_ascii_lowercase();
@@ -297,6 +325,10 @@ impl Settings {
             ("single_letters", b(self.single_letters).to_string()),
             ("switch_on_enter", b(self.switch_on_enter).to_string()),
             ("double_shift", b(self.double_shift).to_string()),
+            ("undo_backspace", b(self.undo_backspace).to_string()),
+            ("fix_caps", b(self.fix_caps).to_string()),
+            ("skip_code", b(self.skip_code).to_string()),
+            ("careful_after_switch", b(self.careful_after_switch).to_string()),
             ("sensitivity", format!("{:.2}", self.sensitivity)),
             ("language", self.language.clone()),
             ("hotkey_convert_word", self.hotkey_convert_word.to_string()),
