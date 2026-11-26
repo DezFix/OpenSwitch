@@ -5,8 +5,10 @@
 use std::collections::HashSet;
 
 use crate::config::Settings;
-use crate::detect::{looks_like_code, Detector};
-use crate::layout::{KeyMap, KeyStroke, Lang};
+use crate::detect::Detector;
+use crate::layout::{KeyStroke, Lang};
+use crate::spelling;
+use crate::text::{capitalize_keys, caps_accident, ends_sentence, needs_capital, without_caps, SENTENCE_END};
 
 pub const VK_BACK: u8 = 0x08;
 pub const VK_RETURN: u8 = 0x0D;
@@ -29,36 +31,8 @@ const SHIFT_TAP_MAX_MS: u64 = 300;
 const FORCED_LAYOUT_MS: u64 = 1000;
 /// Sensitivity factor for the first word after the user switched the layout on purpose.
 const CAREFUL: f32 = 0.75;
-/// Shortest word for the CapsLock fix (пРИВЕТ -> Привет).
-const CAPS_FIX_MIN: usize = 3;
 /// Shortest word learned from a manual fix.
 const LEARN_MIN: usize = 2;
-/// Characters that end a sentence.
-const SENTENCE_END: [char; 4] = ['.', '!', '?', '…'];
-/// Abbreviations with a dot that do not end a sentence (besides single letters: «г.», «т.»,
-/// and dotted ones: «т.е.», «e.g.»).
-const ABBREVIATIONS: &[&str] = &[
-    "др", "пр", "см", "стр", "ул", "руб", "коп", "млн", "млрд", "тыс", "им", "напр", "ст", "обл", "гр", "проф", "акад",
-    "св", "кв", "рис", "табл", "вул", "див", "грн", "etc", "vs", "mr", "mrs", "ms", "dr", "jr", "sr", "no", "fig",
-    "approx",
-];
-
-/// Does a word end a sentence? «дела.», «ура!», «правда?» do; «т.», «т.е.», «ул.», «etc.» don't.
-fn ends_sentence(word: &str) -> bool {
-    let Some(head) = word.strip_suffix('.') else {
-        return word.ends_with(['!', '?', '…']);
-    };
-    if head.ends_with('.') {
-        return true; // "..." and "?." count as an end
-    }
-    let lower = head.to_lowercase();
-    let letters = lower.chars().filter(|c| c.is_alphabetic()).count();
-    !(letters <= 1 || lower.contains('.') || ABBREVIATIONS.contains(&lower.as_str()))
-}
-
-/// English words that are always written with a capital I.
-const ENGLISH_I: [&str; 5] = ["i", "i'm", "i'll", "i've", "i'd"];
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     /// Press Backspace n times.
@@ -121,43 +95,17 @@ struct Word {
     sentence_start: bool,
 }
 
-/// Word typed with CapsLock on by accident: Shift held for the first letter only, so it came
-/// out as пРИВЕТ. All keys must be letters in `map`.
-fn caps_accident(keys: &[KeyStroke], map: &KeyMap) -> bool {
-    keys.len() >= CAPS_FIX_MIN
-        && keys.iter().all(|k| k.caps && map.caps_sensitive(k.vk))
-        && keys[0].shift
-        && keys[1..].iter().all(|k| !k.shift)
-}
-
-/// Should this word get a capital first letter? At the start of a sentence, if it is all
-/// small letters (not iPhone, eBay, links or code); English "i", "i'm"... always.
-fn needs_capital(text: &str, sentence_start: bool, latin: bool) -> bool {
-    let Some(first) = text.chars().next() else { return false };
-    if !first.is_lowercase() {
-        return false;
+/// Module "Spelling" for a word shown in layout `lang`: the keys of the fixed word. Only words
+/// unknown in every language of the layout are touched (a Ukrainian layout that also stands
+/// for Russian keeps Russian words).
+fn spell(d: &Detector, text: &str, lang: Lang) -> Option<Vec<KeyStroke>> {
+    let languages = d.layouts.languages(lang);
+    let (&main, others) = languages.split_first()?;
+    if others.iter().any(|&l| d.model(l).clean(text).is_some_and(|w| d.model(l).rank(&w).is_some())) {
+        return None;
     }
-    if latin && ENGLISH_I.contains(&text) {
-        return true;
-    }
-    sentence_start && !text.chars().any(char::is_uppercase) && !(latin && looks_like_code(text))
-}
-
-/// Make the first key type a capital letter. False if it cannot (not a letter key).
-fn capitalize_keys(keys: &mut [KeyStroke], map: &KeyMap) -> bool {
-    let Some(k) = keys.first_mut() else { return false };
-    let upper = KeyStroke { vk: k.vk, shift: if map.caps_sensitive(k.vk) { !k.caps } else { true }, caps: k.caps };
-    if map.render_key(upper).is_some_and(char::is_uppercase) {
-        *k = upper;
-        true
-    } else {
-        false
-    }
-}
-
-/// The same keys as if CapsLock had been off: capital first letter, the rest small.
-fn without_caps(keys: &[KeyStroke]) -> Vec<KeyStroke> {
-    keys.iter().enumerate().map(|(i, k)| KeyStroke { vk: k.vk, shift: i == 0, caps: false }).collect()
+    let fixed = spelling::correct(d.model(main), Some(d.layouts.map(lang)), text)?;
+    d.layouts.keys_for_text(&fixed, lang)
 }
 
 pub struct Engine {
@@ -291,7 +239,7 @@ impl Engine {
                     self.shift_clean && self.shift_down_at.is_some_and(|t| now.saturating_sub(t) <= SHIFT_TAP_MAX_MS);
                 self.shift_down_at = None;
                 self.shift_clean = false;
-                if was_tap && self.settings.double_shift {
+                if was_tap && self.settings.module_layout && self.settings.double_shift {
                     if self.last_shift_tap.is_some_and(|t| now.saturating_sub(t) <= DOUBLE_SHIFT_MS) {
                         self.last_shift_tap = None;
                         let lang = self.effective_lang(layout, now);
@@ -357,15 +305,16 @@ impl Engine {
 
         let (ctrl, alt, shift, win) = (self.ctrl(), self.alt(), self.shift(), self.win());
         let s = &self.settings;
-        if s.hotkey_convert_word.matches(vk, ctrl, alt, shift, win) {
+        let hotkeys = s.module_layout;
+        if hotkeys && s.hotkey_convert_word.matches(vk, ctrl, alt, shift, win) {
             let lang = self.effective_lang(layout, now);
             return Output { swallow: true, actions: self.convert_word(lang, now) };
         }
-        if s.hotkey_convert_selection.matches(vk, ctrl, alt, shift, win) {
+        if hotkeys && s.hotkey_convert_selection.matches(vk, ctrl, alt, shift, win) {
             self.word = None;
             return Output { swallow: true, actions: vec![Action::ConvertSelection] };
         }
-        if s.hotkey_toggle_auto.matches(vk, ctrl, alt, shift, win) {
+        if hotkeys && s.hotkey_toggle_auto.matches(vk, ctrl, alt, shift, win) {
             return Output { swallow: true, actions: vec![Action::ToggleAuto] };
         }
         if ctrl || alt || win {
@@ -449,8 +398,11 @@ impl Engine {
     }
 
     fn boundary(&mut self, vk: u8, now: u64, auto_allowed: bool) -> Output {
-        let auto_on = self.settings.auto_switch && auto_allowed;
-        let caps_on = self.settings.fix_caps && auto_allowed;
+        let s = &self.settings;
+        let auto_on = s.module_layout && s.auto_switch && auto_allowed;
+        let caps_on = s.module_text && s.fix_caps && auto_allowed;
+        let capital_on = s.module_text && s.capitalize && auto_allowed;
+        let spell_on = s.module_spelling && auto_allowed;
         let Some(w) = &mut self.word else {
             return Output::pass();
         };
@@ -463,16 +415,25 @@ impl Engine {
             let caps_fix = caps_on && caps_accident(&w.keys, self.detector.layouts.map(to));
             let n = self.detector.layouts.render(&w.keys, from).chars().count();
             let mut keys = if caps_fix { without_caps(&w.keys) } else { w.keys.clone() };
-            let capital = self.settings.capitalize
-                && auto_allowed
+            let typed = self.detector.layouts.render(&w.keys, w.typed_lang).to_lowercase();
+            let spelled = spell_on
+                && !self.detector.never_switch.contains(&typed)
+                && match spell(&self.detector, &self.detector.layouts.render(&keys, to), to) {
+                    Some(fixed) => {
+                        keys = fixed;
+                        true
+                    }
+                    None => false,
+                };
+            let capital = capital_on
                 && needs_capital(
                     &self.detector.layouts.render(&keys, to),
                     w.sentence_start,
                     self.detector.layouts.is_latin(to),
                 )
                 && capitalize_keys(&mut keys, self.detector.layouts.map(to));
-            if switch || caps_fix || capital {
-                if caps_fix || capital {
+            if switch || caps_fix || capital || spelled {
+                if caps_fix || capital || spelled {
                     w.original = Some(std::mem::replace(&mut w.keys, keys));
                 }
                 let mut actions = vec![
@@ -568,11 +529,11 @@ impl Engine {
         if w.shown_lang != w.typed_lang {
             actions.push(Action::SwitchLayout(w.typed_lang));
             self.forced = Some((w.typed_lang, now));
-            let word = layouts.render(&keys, w.typed_lang).to_lowercase();
-            if !self.undone.insert(word.clone()) {
-                self.detector.never_switch.insert(word.clone());
-                actions.push(Action::AddException(word));
-            }
+        }
+        let word = layouts.render(&keys, w.typed_lang).to_lowercase();
+        if !self.undone.insert(word.clone()) {
+            self.detector.never_switch.insert(word.clone());
+            actions.push(Action::AddException(word));
         }
         w.keys = keys;
         w.shown_lang = w.typed_lang;
@@ -993,6 +954,52 @@ mod tests {
         e.on_key(VK_LSHIFT, true, t, Some(Lang::Ru), true);
         assert!(!e.on_key(b'6', true, t, Some(Lang::Ru), true).swallow);
         e.on_key(VK_LSHIFT, false, t, Some(Lang::Ru), true);
+    }
+
+    #[test]
+    fn modules_turn_off() {
+        let mut t = 0;
+        // Layout module off: no automatic fix, hotkeys do nothing
+        let mut e = Engine::new(Detector::new(), Settings { module_layout: false, ..Settings::default() });
+        typ(&mut e, "ghbdtn", Lang::En, &mut t);
+        assert!(!space(&mut e, Lang::En, &mut t).swallow);
+        let o = e.on_key(crate::config::VK_PAUSE, true, t + 10, Some(Lang::En), true);
+        assert!(!o.swallow && o.actions.is_empty());
+        // Text module off: no capital letters
+        let mut e = Engine::new(Detector::new(), Settings { module_text: false, ..Settings::default() });
+        enter(&mut e, Lang::Ru, &mut t);
+        typ(&mut e, "как", Lang::Ru, &mut t);
+        assert!(!space(&mut e, Lang::Ru, &mut t).swallow);
+        // Spelling module is off by default
+        let mut e = Engine::new(Detector::new(), Settings::default());
+        typ(&mut e, "првиет", Lang::Ru, &mut t);
+        assert!(!space(&mut e, Lang::Ru, &mut t).swallow);
+    }
+
+    #[test]
+    fn spelling_module() {
+        let mut e = Engine::new(Detector::new(), Settings { module_spelling: true, ..Settings::default() });
+        let mut t = 0;
+        typ(&mut e, "првиет", Lang::Ru, &mut t);
+        let o = space(&mut e, Lang::Ru, &mut t);
+        assert_eq!(o.actions, vec![Action::Backspace(6), Action::Type("привет".into()), Action::Tap(VK_SPACE)]);
+        // undo with Backspace; twice -> left alone for good
+        let o = e.on_key(VK_BACK, true, t + 10, Some(Lang::Ru), true);
+        assert_eq!(o.actions[1], Action::Type("првиет".into()));
+        t += 100;
+        e.reset();
+        typ(&mut e, "првиет", Lang::Ru, &mut t);
+        assert!(space(&mut e, Lang::Ru, &mut t).swallow);
+        let o = e.on_key(VK_BACK, true, t + 10, Some(Lang::Ru), true);
+        assert_eq!(o.actions.last(), Some(&Action::AddException("првиет".into())));
+        e.reset();
+        typ(&mut e, "првиет", Lang::Ru, &mut t);
+        assert!(!space(&mut e, Lang::Ru, &mut t).swallow);
+        // A wrong layout and a typo at once («првиет» in English keys) is not recognised yet:
+        // the layout detector does not know the word, so it is left as typed.
+        let mut e = Engine::new(Detector::new(), Settings { module_spelling: true, ..Settings::default() });
+        typ(&mut e, "ghdbtn", Lang::En, &mut t);
+        assert!(!space(&mut e, Lang::En, &mut t).swallow);
     }
 
     #[test]

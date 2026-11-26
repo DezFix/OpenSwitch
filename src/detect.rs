@@ -47,6 +47,26 @@ impl LangModel {
         LangModel { model, ranks, alpha: alpha.chars().collect(), tri }
     }
 
+    /// The same model with only the `n` most frequent words in the dictionary (to test how
+    /// words missing from the dictionary are treated).
+    pub fn limited(model: Model, n: usize) -> Self {
+        let mut m = LangModel::new(model);
+        m.ranks.retain(|_, r| (*r as usize) <= n);
+        m
+    }
+
+    /// The dictionary, most frequent first.
+    pub fn words(&self) -> Vec<&'static str> {
+        let mut v: Vec<(&'static str, u32)> = self.ranks.iter().map(|(w, r)| (*w, *r)).collect();
+        v.sort_by_key(|x| x.1);
+        v.into_iter().map(|x| x.0).collect()
+    }
+
+    /// The letters of this language (for the spelling module).
+    pub fn letters(&self) -> impl Iterator<Item = char> + '_ {
+        self.alpha.iter().copied().filter(|c| c.is_alphabetic())
+    }
+
     fn idx(&self, c: char) -> Option<usize> {
         self.alpha.iter().position(|&a| a == c)
     }

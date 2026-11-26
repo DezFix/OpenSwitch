@@ -1013,6 +1013,10 @@ pub fn run() {
         SetTimer(hwnd, TIMER_REHOOK, 60_000, None);
         SetTimer(hwnd, TIMER_WATCH, WATCH_MS, None);
 
+        if !with_app(|a| a.engine.settings.setup_done).unwrap_or(true) {
+            // First run: show the guide (it marks itself done when closed).
+            sys::spawn_self(&["--setup"]);
+        }
         if !warnings.is_empty() {
             log::warn!("settings.ini: {}", warnings.join("; "));
             message_box(hwnd, &i18n::f("Errors in settings.ini:\n{}", &[&warnings.join("\n")]), MB_ICONWARNING);

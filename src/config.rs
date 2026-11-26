@@ -148,6 +148,14 @@ fn key_vk(name: &str) -> Option<u8> {
 
 #[derive(Clone, Debug)]
 pub struct Settings {
+    /// Module "Layout": automatic and manual layout fixes, hotkeys, double Shift.
+    pub module_layout: bool,
+    /// Module "Text": capital letters, CapsLock fix, space before punctuation.
+    pub module_text: bool,
+    /// Module "Spelling": typo fixes with the built-in dictionaries.
+    pub module_spelling: bool,
+    /// The first-run window was shown (or skipped).
+    pub setup_done: bool,
     pub auto_switch: bool,
     pub single_letters: bool,
     pub switch_on_enter: bool,
@@ -181,6 +189,10 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
+            module_layout: true,
+            module_text: true,
+            module_spelling: false,
+            setup_done: false,
             auto_switch: true,
             single_letters: true,
             switch_on_enter: true,
@@ -218,6 +230,17 @@ const DEFAULT_EXCLUDE: &[&str] = &[
 pub const DEFAULT_FILE: &str = "\
 # OpenSwitch - настройки. Удобнее менять в окне «Настройки» (меню значка в трее).\n# После ручной правки файла: меню в трее -> «Перечитать настройки».
 # Значения true/false. Горячие клавиши: Pause, Shift+Pause, Alt+Pause, Ctrl+Shift+F12, ScrollLock, none ...
+
+# Модули: что OpenSwitch делает. Каждый включается отдельно.
+# Раскладка: исправление слов, набранных не в той раскладке, горячие клавиши
+module_layout = true
+# Текст: заглавные буквы, случайный CapsLock, пробел перед знаками
+module_text = true
+# Орфография: исправление опечаток по встроенным словарям
+module_spelling = false
+
+# Окно первого запуска уже показано
+setup_done = false
 
 # Автоматически исправлять слова, набранные не в той раскладке
 auto_switch = true
@@ -299,6 +322,10 @@ impl Settings {
             };
             let (k, v) = (k.trim().to_ascii_lowercase(), v.trim());
             let ok = match k.as_str() {
+                "module_layout" => parse_bool(v).map(|b| s.module_layout = b).is_some(),
+                "module_text" => parse_bool(v).map(|b| s.module_text = b).is_some(),
+                "module_spelling" => parse_bool(v).map(|b| s.module_spelling = b).is_some(),
+                "setup_done" => parse_bool(v).map(|b| s.setup_done = b).is_some(),
                 "auto_switch" => parse_bool(v).map(|b| s.auto_switch = b).is_some(),
                 "single_letters" => parse_bool(v).map(|b| s.single_letters = b).is_some(),
                 "switch_on_enter" => parse_bool(v).map(|b| s.switch_on_enter = b).is_some(),
@@ -353,6 +380,10 @@ impl Settings {
         let ex: Vec<&str> = ex.iter().map(|s| s.as_str()).collect();
         let mut t = String::from(DEFAULT_FILE);
         for (k, v) in [
+            ("module_layout", b(self.module_layout).to_string()),
+            ("module_text", b(self.module_text).to_string()),
+            ("module_spelling", b(self.module_spelling).to_string()),
+            ("setup_done", b(self.setup_done).to_string()),
             ("auto_switch", b(self.auto_switch).to_string()),
             ("single_letters", b(self.single_letters).to_string()),
             ("switch_on_enter", b(self.switch_on_enter).to_string()),

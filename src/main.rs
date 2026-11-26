@@ -12,6 +12,8 @@ mod clipboard;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod logging;
 #[cfg(windows)]
+mod setup;
+#[cfg(windows)]
 mod sys;
 #[cfg(windows)]
 mod ui;
@@ -23,6 +25,9 @@ fn main() {
     if std::env::args().any(|a| a == "--settings" || a == "/settings") {
         logging::init("settings");
         ui::run();
+    } else if std::env::args().any(|a| a == "--setup" || a == "/setup") {
+        logging::init("setup");
+        setup::run();
     } else {
         logging::init("tray");
         win::run();

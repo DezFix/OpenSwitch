@@ -18,13 +18,15 @@ use crate::{logging, sys};
 const SIDEBAR_WIDTH: f32 = 190.0;
 /// Menu item highlighted after a click while the page scrolls there.
 const JUMP_MS: u64 = 700;
-const RED: Color32 = Color32::from_rgb(0xD0, 0x50, 0x30);
+pub(crate) const RED: Color32 = Color32::from_rgb(0xD0, 0x50, 0x30);
 const GREEN: Color32 = Color32::from_rgb(0x2E, 0x9E, 0x4F);
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 enum Section {
     General,
-    Layouts,
+    Layout,
+    Text,
+    Spelling,
     Hotkeys,
     Programs,
     Words,
@@ -32,13 +34,23 @@ enum Section {
 }
 
 impl Section {
-    const ALL: [Section; 6] =
-        [Section::General, Section::Layouts, Section::Hotkeys, Section::Programs, Section::Words, Section::About];
+    const ALL: [Section; 8] = [
+        Section::General,
+        Section::Layout,
+        Section::Text,
+        Section::Spelling,
+        Section::Hotkeys,
+        Section::Programs,
+        Section::Words,
+        Section::About,
+    ];
 
     fn title(self) -> &'static str {
         match self {
             Section::General => t("General"),
-            Section::Layouts => t("Layouts"),
+            Section::Layout => t("Layout"),
+            Section::Text => t("Text"),
+            Section::Spelling => t("Spelling"),
             Section::Hotkeys => t("Hotkeys"),
             Section::Programs => t("Programs"),
             Section::Words => t("Words"),
@@ -313,6 +325,42 @@ impl SettingsApp {
             });
         }
 
+        let label = t("Start OpenSwitch with Windows");
+        if p.row(ui, &[label, "autostart"]) {
+            setting_row(ui, label, None, |ui| {
+                if toggle(ui, &mut self.autostart).changed() {
+                    sys::set_startup(self.autostart);
+                }
+            });
+        }
+
+        let (label, hint) = (t("Undo a fix with Backspace"), t("Backspace right after a fix brings the word back"));
+        if p.row(ui, &[label, hint]) {
+            setting_row(ui, label, Some(hint), |ui| toggle(ui, &mut self.s.undo_backspace));
+        }
+
+        let (label, hint) = (t("Try it here"), t("Type «ghbdtn» and a space, it should become «привет»"));
+        if p.row(ui, &[label, hint]) {
+            ui.add_space(6.0);
+            ui.label(label);
+            ui.label(RichText::new(hint).small().weak());
+            ui.add(egui::TextEdit::multiline(&mut self.test_text).desired_rows(2).desired_width(f32::INFINITY));
+        }
+    }
+
+    fn layout_module(&mut self, ui: &mut egui::Ui, p: &mut Page) {
+        p.begin(Section::Layout);
+        let (label, hint) = (
+            t("Module «Layout»"),
+            t("Fixes words typed in the wrong layout and switches the layout. Hotkeys and double Shift belong to it too."),
+        );
+        if p.row(ui, &[label, hint]) {
+            module_row(ui, label, hint, &mut self.s.module_layout);
+        }
+        if !self.s.module_layout {
+            return;
+        }
+
         let (label, hint) =
             (t("Fix the layout automatically"), t("A word typed in the wrong layout is fixed after Space"));
         if p.row(ui, &[label, hint]) {
@@ -334,34 +382,34 @@ impl SettingsApp {
             });
         }
 
-        let (label, hint) = (t("Undo a fix with Backspace"), t("Backspace right after a fix brings the word back"));
-        if p.row(ui, &[label, hint]) {
-            setting_row(ui, label, Some(hint), |ui| toggle(ui, &mut self.s.undo_backspace));
-        }
-
-        let (label, hint) = (t("Fix accidental CapsLock"), t("пРИВЕТ becomes Привет and CapsLock turns off"));
-        if p.row(ui, &[label, hint, "caps"]) {
-            setting_row(ui, label, Some(hint), |ui| toggle(ui, &mut self.s.fix_caps));
-        }
-
-        let (label, hint) =
-            (t("Capital letter at the start of a sentence"), t("After . ! ? and Enter; English i becomes I"));
-        if p.row(ui, &[label, hint, "text"]) {
-            setting_row(ui, label, Some(hint), |ui| toggle(ui, &mut self.s.capitalize));
-        }
-
-        let (label, hint) = (t("Remove the space before , . ! ?"), t("«привет , как» becomes «привет, как»"));
-        if p.row(ui, &[label, hint, "text"]) {
-            setting_row(ui, label, Some(hint), |ui| toggle(ui, &mut self.s.fix_space));
-        }
-
-        let label = t("Start OpenSwitch with Windows");
-        if p.row(ui, &[label, "autostart"]) {
-            setting_row(ui, label, None, |ui| {
-                if toggle(ui, &mut self.autostart).changed() {
-                    sys::set_startup(self.autostart);
-                }
-            });
+        let label = t("Switch between these layouts");
+        let hint = t("Turn a layout off and words are never switched to it automatically (Pause still can).");
+        let names: Vec<String> = self.layout_codes.iter().map(|c| layout_name(c)).collect();
+        let mut texts: Vec<&str> = vec![label, hint, t("Layouts"), "EN", "RU", "UA", "BY"];
+        texts.extend(names.iter().map(|s| s.as_str()));
+        if p.row(ui, &texts) {
+            ui.add_space(8.0);
+            ui.label(label);
+            ui.label(RichText::new(hint).small().weak());
+            if self.layout_codes.len() < 2 {
+                ui.add_space(4.0);
+                ui.colored_label(
+                    RED,
+                    t("Windows has fewer than two layouts OpenSwitch knows (English, Russian, Ukrainian, Belarusian). Add one in Windows settings → Time and language → Language."),
+                );
+            }
+            for (code, name) in self.layout_codes.clone().into_iter().zip(names) {
+                setting_row(ui, &name, None, |ui| {
+                    let mut on = !self.s.disabled_layouts.contains(code);
+                    if toggle(ui, &mut on).changed() {
+                        if on {
+                            self.s.disabled_layouts.remove(code);
+                        } else {
+                            self.s.disabled_layouts.insert(code.to_string());
+                        }
+                    }
+                });
+            }
         }
 
         // Fine tuning: folded away normally, shown flat while searching.
@@ -403,45 +451,51 @@ impl SettingsApp {
                 fine(self, ui, p);
             });
         }
+    }
 
-        let (label, hint) = (t("Try it here"), t("Type «ghbdtn» and a space, it should become «привет»"));
+    fn text_module(&mut self, ui: &mut egui::Ui, p: &mut Page) {
+        p.begin(Section::Text);
+        let (label, hint) = (
+            t("Module «Text»"),
+            t("Small fixes by simple rules: capital letters, an accidental CapsLock, a space before a mark."),
+        );
         if p.row(ui, &[label, hint]) {
-            ui.add_space(6.0);
-            ui.label(label);
-            ui.label(RichText::new(hint).small().weak());
-            ui.add(egui::TextEdit::multiline(&mut self.test_text).desired_rows(2).desired_width(f32::INFINITY));
+            module_row(ui, label, hint, &mut self.s.module_text);
+        }
+        if !self.s.module_text {
+            return;
+        }
+        let (label, hint) =
+            (t("Capital letter at the start of a sentence"), t("After . ! ? and Enter; English i becomes I"));
+        if p.row(ui, &[label, hint]) {
+            setting_row(ui, label, Some(hint), |ui| toggle(ui, &mut self.s.capitalize));
+        }
+        let (label, hint) = (t("Remove the space before , . ! ?"), t("«привет , как» becomes «привет, как»"));
+        if p.row(ui, &[label, hint]) {
+            setting_row(ui, label, Some(hint), |ui| toggle(ui, &mut self.s.fix_space));
+        }
+        let (label, hint) = (t("Fix accidental CapsLock"), t("пРИВЕТ becomes Привет and CapsLock turns off"));
+        if p.row(ui, &[label, hint, "caps"]) {
+            setting_row(ui, label, Some(hint), |ui| toggle(ui, &mut self.s.fix_caps));
         }
     }
 
-    fn layouts(&mut self, ui: &mut egui::Ui, p: &mut Page) {
-        p.begin(Section::Layouts);
-        let label = t("Switch between these layouts");
-        let hint = t("Turn a layout off and words are never switched to it automatically (Pause still can).");
-        let names: Vec<String> = self.layout_codes.iter().map(|c| layout_name(c)).collect();
-        let mut texts: Vec<&str> = vec![label, hint, "EN", "RU", "UA", "BY"];
-        texts.extend(names.iter().map(|s| s.as_str()));
-        if !p.row(ui, &texts) {
+    fn spelling_module(&mut self, ui: &mut egui::Ui, p: &mut Page) {
+        p.begin(Section::Spelling);
+        let (label, hint) = (
+            t("Module «Spelling»"),
+            t("Fixes typos with the built-in dictionaries: «првиет» becomes «привет». Only when the fix is clear; words of 5+ letters."),
+        );
+        if p.row(ui, &[label, hint, "typo"]) {
+            module_row(ui, label, hint, &mut self.s.module_spelling);
+        }
+        if !self.s.module_spelling {
             return;
         }
-        ui.label(RichText::new(hint).small().weak());
-        if self.layout_codes.len() < 2 {
+        let note = t("Backspace right after a fix brings the word back; undo the same word twice and it is never fixed again (see «Words»).");
+        if p.row(ui, &[note]) {
             ui.add_space(4.0);
-            ui.colored_label(
-                RED,
-                t("Windows has fewer than two layouts OpenSwitch knows (English, Russian, Ukrainian, Belarusian). Add one in Windows settings → Time and language → Language."),
-            );
-        }
-        for (code, name) in self.layout_codes.clone().into_iter().zip(names) {
-            setting_row(ui, &name, None, |ui| {
-                let mut on = !self.s.disabled_layouts.contains(code);
-                if toggle(ui, &mut on).changed() {
-                    if on {
-                        self.s.disabled_layouts.remove(code);
-                    } else {
-                        self.s.disabled_layouts.insert(code.to_string());
-                    }
-                }
-            });
+            ui.label(RichText::new(note).small().weak());
         }
     }
 
@@ -601,6 +655,15 @@ impl SettingsApp {
             ui.hyperlink_to(t("Source code on GitHub"), "https://github.com/DezFix/OpenSwitch");
         }
 
+        let (label, hint) = (t("First-run guide"), t("How to use OpenSwitch and which modules to turn on"));
+        if p.row(ui, &[label, hint, "guide", "help"]) {
+            setting_row(ui, label, Some(hint), |ui| {
+                if ui.button(t("Show")).clicked() {
+                    sys::spawn_self(&["--setup"]);
+                }
+            });
+        }
+
         let (label, hint) = (t("Program files"), t("Settings, exception words and the log for bug reports"));
         if p.row(ui, &[label, hint, "log", "settings.ini"]) {
             setting_row(ui, label, Some(hint), |ui| {
@@ -706,7 +769,9 @@ impl SettingsApp {
         let out = egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.set_max_width(ui.available_width() - 12.0);
             self.general(ui, &mut p);
-            self.layouts(ui, &mut p);
+            self.layout_module(ui, &mut p);
+            self.text_module(ui, &mut p);
+            self.spelling_module(ui, &mut p);
             self.hotkeys(ui, &mut p);
             self.programs(ui, &mut p);
             self.words(ui, &mut p);
@@ -789,7 +854,12 @@ impl eframe::App for SettingsApp {
 // ---------------------------------------------------------------- widgets
 
 /// A row: label (and a small hint under it) on the left, the control on the right.
-fn setting_row<R>(ui: &mut egui::Ui, label: &str, hint: Option<&str>, control: impl FnOnce(&mut egui::Ui) -> R) {
+pub(crate) fn setting_row<R>(
+    ui: &mut egui::Ui,
+    label: &str,
+    hint: Option<&str>,
+    control: impl FnOnce(&mut egui::Ui) -> R,
+) {
     ui.add_space(4.0);
     let height = if hint.is_some() { 38.0 } else { 26.0 };
     egui::Sides::new().height(height).shrink_left().wrap().show(
@@ -811,8 +881,28 @@ fn setting_row<R>(ui: &mut egui::Ui, label: &str, hint: Option<&str>, control: i
     ui.painter().hline(x, y, ui.visuals().widgets.noninteractive.bg_stroke);
 }
 
+/// The on/off row of a module: bigger, with a description under it.
+pub(crate) fn module_row(ui: &mut egui::Ui, label: &str, hint: &str, on: &mut bool) {
+    ui.add_space(4.0);
+    egui::Sides::new().height(44.0).shrink_left().wrap().show(
+        ui,
+        |ui| {
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.label(RichText::new(label).strong().size(15.5));
+                ui.label(RichText::new(hint).small().weak());
+            });
+        },
+        |ui| toggle(ui, on),
+    );
+    ui.add_space(6.0);
+    let y = ui.cursor().top();
+    let x = ui.max_rect().x_range();
+    ui.painter().hline(x, y, ui.visuals().widgets.noninteractive.bg_stroke);
+}
+
 /// On/off switch.
-fn toggle(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
+pub(crate) fn toggle(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
     let (rect, mut r) = ui.allocate_exact_size(egui::vec2(38.0, 21.0), Sense::click());
     if r.clicked() {
         *on = !*on;
@@ -917,7 +1007,7 @@ fn is_mouse_or_modifier(vk: u8) -> bool {
 }
 
 /// "Ukrainian (UA)" for a layout code.
-fn layout_name(code: &str) -> String {
+pub(crate) fn layout_name(code: &str) -> String {
     let name = match code {
         "EN" => t("English"),
         "RU" => t("Russian"),
@@ -949,12 +1039,12 @@ fn add_exe(s: &mut Settings, name: &str) {
 }
 
 /// Window icon: the application icon (assets/openswitch.svg) rendered at 64x64, raw RGBA.
-fn app_icon() -> egui::IconData {
+pub(crate) fn app_icon() -> egui::IconData {
     const RGBA: &[u8] = include_bytes!("../assets/icon-64.rgba");
     egui::IconData { rgba: RGBA.to_vec(), width: 64, height: 64 }
 }
 
-fn setup_fonts(ctx: &egui::Context) {
+pub(crate) fn setup_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     let windir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
     if let Ok(bytes) = std::fs::read(format!("{windir}\\Fonts\\segoeui.ttf")) {

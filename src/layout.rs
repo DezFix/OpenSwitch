@@ -143,6 +143,11 @@ impl KeyMap {
         self.chars[ks.vk as usize][upper as usize]
     }
 
+    /// The virtual key that types `c` (with or without Shift), if any.
+    pub fn key_of_char(&self, c: char) -> Option<u8> {
+        self.key_for_char(c).map(|(vk, _)| vk)
+    }
+
     /// Which key + shift produces `c` (ignores CapsLock). Word keys are preferred over others.
     fn key_for_char(&self, c: char) -> Option<(u8, bool)> {
         let mut fallback = None;

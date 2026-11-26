@@ -4,3 +4,5 @@ pub mod detect;
 pub mod engine;
 pub mod i18n;
 pub mod layout;
+pub mod spelling;
+pub mod text;
