@@ -191,6 +191,12 @@ pub struct Settings {
     pub theme: String,
     /// Executables (lowercase file names) where auto switching is disabled.
     pub exclude: HashSet<String>,
+    /// Executables where OpenSwitch does nothing at all (hotkeys included).
+    pub apps_off: HashSet<String>,
+    /// Executables that get the English layout each time you switch to them.
+    pub apps_english: HashSet<String>,
+    /// Executables that get back the layout they had when you left them.
+    pub apps_remember: HashSet<String>,
     /// Layouts (codes like RU, UA) words are never switched *to* automatically.
     pub disabled_layouts: HashSet<String>,
 }
@@ -223,6 +229,9 @@ impl Default for Settings {
             language: "system".into(),
             theme: "system".into(),
             exclude: DEFAULT_EXCLUDE.iter().map(|s| s.to_string()).collect(),
+            apps_off: HashSet::new(),
+            apps_english: HashSet::new(),
+            apps_remember: HashSet::new(),
             disabled_layouts: HashSet::new(),
         }
     }
@@ -357,7 +366,46 @@ disabled_layouts =
 # Программы, в которых автопереключение не работает (ручное исправление работает).
 # Имена exe через запятую.
 exclude = cmd.exe, powershell.exe, pwsh.exe, windowsterminal.exe, conhost.exe, putty.exe, mintty.exe, keepass.exe, keepassxc.exe
+
+# Программы, в которых OpenSwitch не делает ничего (и горячие клавиши тоже не работают)
+apps_off =
+
+# Программы, в которых при каждом переходе в них включается английская раскладка
+apps_english =
+
+# Программы, в которых при возврате восстанавливается раскладка, с которой вы из них ушли
+apps_remember =
 ";
+
+/// How OpenSwitch treats one program.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AppRule {
+    /// As everywhere.
+    Normal,
+    /// No automatic fixes; hotkeys work (`exclude`).
+    Manual,
+    /// The English layout each time you switch to the program.
+    English,
+    /// The layout it had when you left it.
+    Remember,
+    /// Nothing at all.
+    Off,
+}
+
+impl AppRule {
+    /// The rules a program in the list can have.
+    pub const LISTED: [AppRule; 4] = [AppRule::Manual, AppRule::English, AppRule::Remember, AppRule::Off];
+}
+
+fn exe_list(v: &str) -> HashSet<String> {
+    v.split([',', ';']).map(|x| x.trim().to_lowercase()).filter(|x| !x.is_empty()).collect()
+}
+
+fn sorted_list(set: &HashSet<String>) -> String {
+    let mut v: Vec<&str> = set.iter().map(|s| s.as_str()).collect();
+    v.sort();
+    v.join(", ")
+}
 
 fn parse_bool(v: &str) -> Option<bool> {
     match v.trim().to_ascii_lowercase().as_str() {
@@ -428,6 +476,18 @@ impl Settings {
                         v.split([',', ';']).map(|x| x.trim().to_uppercase()).filter(|x| !x.is_empty()).collect();
                     true
                 }
+                "apps_off" => {
+                    s.apps_off = exe_list(v);
+                    true
+                }
+                "apps_english" => {
+                    s.apps_english = exe_list(v);
+                    true
+                }
+                "apps_remember" => {
+                    s.apps_remember = exe_list(v);
+                    true
+                }
                 "exclude" => {
                     s.exclude =
                         v.split([',', ';']).map(|x| x.trim().to_lowercase()).filter(|x| !x.is_empty()).collect();
@@ -443,6 +503,45 @@ impl Settings {
             }
         }
         (s, warn)
+    }
+
+    /// The rule of a program (lowercase exe name). A program in several lists: the strictest.
+    pub fn app_rule(&self, exe: &str) -> AppRule {
+        if self.apps_off.contains(exe) {
+            AppRule::Off
+        } else if self.exclude.contains(exe) {
+            AppRule::Manual
+        } else if self.apps_english.contains(exe) {
+            AppRule::English
+        } else if self.apps_remember.contains(exe) {
+            AppRule::Remember
+        } else {
+            AppRule::Normal
+        }
+    }
+
+    /// Give a program a rule (`Normal` takes it off the lists).
+    pub fn set_app_rule(&mut self, exe: &str, rule: AppRule) {
+        for list in [&mut self.apps_off, &mut self.exclude, &mut self.apps_english, &mut self.apps_remember] {
+            list.remove(exe);
+        }
+        let list = match rule {
+            AppRule::Normal => return,
+            AppRule::Manual => &mut self.exclude,
+            AppRule::English => &mut self.apps_english,
+            AppRule::Remember => &mut self.apps_remember,
+            AppRule::Off => &mut self.apps_off,
+        };
+        list.insert(exe.to_string());
+    }
+
+    /// Every program with a rule, sorted by name.
+    pub fn app_rules(&self) -> Vec<(String, AppRule)> {
+        let mut names: Vec<&String> =
+            self.exclude.iter().chain(&self.apps_off).chain(&self.apps_english).chain(&self.apps_remember).collect();
+        names.sort();
+        names.dedup();
+        names.into_iter().map(|n| (n.clone(), self.app_rule(n))).collect()
     }
 
     /// Serialise to the settings file format (with comments).
@@ -478,6 +577,9 @@ impl Settings {
             ("hotkey_convert_selection", self.hotkey_convert_selection.to_string()),
             ("hotkey_toggle_auto", self.hotkey_toggle_auto.to_string()),
             ("exclude", ex.join(", ")),
+            ("apps_off", sorted_list(&self.apps_off)),
+            ("apps_english", sorted_list(&self.apps_english)),
+            ("apps_remember", sorted_list(&self.apps_remember)),
             ("disabled_layouts", {
                 let mut d: Vec<&str> = self.disabled_layouts.iter().map(|s| s.as_str()).collect();
                 d.sort();
@@ -575,6 +677,29 @@ mod tests {
         for vk in [0, 0x2E, 0x25, 0x0D, 0x1B, 0x10] {
             assert!(!is_hotkey_key(vk), "{vk:#x}");
         }
+    }
+
+    #[test]
+    fn app_rules() {
+        let mut s = Settings::default();
+        assert_eq!(s.app_rule("cmd.exe"), AppRule::Manual);
+        assert_eq!(s.app_rule("chrome.exe"), AppRule::Normal);
+        s.set_app_rule("cmd.exe", AppRule::Off);
+        s.set_app_rule("code.exe", AppRule::English);
+        s.set_app_rule("telegram.exe", AppRule::Remember);
+        assert!(!s.exclude.contains("cmd.exe"));
+        let (p, w) = Settings::parse(&s.to_text());
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(p.app_rule("cmd.exe"), AppRule::Off);
+        assert_eq!(p.app_rule("code.exe"), AppRule::English);
+        assert_eq!(p.app_rule("telegram.exe"), AppRule::Remember);
+        assert_eq!(p.app_rule("putty.exe"), AppRule::Manual);
+        s.set_app_rule("code.exe", AppRule::Normal);
+        assert_eq!(s.app_rule("code.exe"), AppRule::Normal);
+        assert!(s.app_rules().iter().any(|(n, r)| n == "cmd.exe" && *r == AppRule::Off));
+        // an old settings.ini (only exclude) still works
+        let (old, _) = Settings::parse("exclude = game.exe");
+        assert_eq!(old.app_rule("game.exe"), AppRule::Manual);
     }
 
     #[test]

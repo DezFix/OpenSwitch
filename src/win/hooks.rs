@@ -118,10 +118,41 @@ pub(super) fn set_foreground(fg: HWND) {
                 app.password_root = fg;
             }
         }
-        app.fg_excluded = exe.as_ref().is_some_and(|n| app.engine.settings.exclude.contains(n));
+        let rule = exe.as_deref().map_or(AppRule::Normal, |n| app.engine.settings.app_rule(n));
+        if fg != app.rules_fg {
+            apply_rules(app, fg, exe.as_deref(), rule);
+        }
+        app.fg_rule = rule;
         app.fg_exe = exe;
         app.fg_known = true;
     });
+}
+
+/// Another window came to the front: when the program changed, remember the layout of the
+/// one left ("remember the layout") and set the layout of the new one ("start with English",
+/// "remember the layout").
+fn apply_rules(app: &mut App, fg: HWND, exe: Option<&str>, rule: AppRule) {
+    let prev = std::mem::replace(&mut app.rules_fg, fg);
+    let prev_exe = std::mem::replace(&mut app.rules_exe, exe.map(str::to_string));
+    if prev_exe.as_deref() == exe {
+        return; // another window of the same program
+    }
+    if let Some(prev_exe) = prev_exe {
+        if app.engine.settings.app_rule(&prev_exe) == AppRule::Remember && unsafe { IsWindow(prev) } != 0 {
+            if let Some(l) = lang_of(&app.hkl, sys::current_hkl(prev)) {
+                app.remembered.insert(prev_exe, l);
+            }
+        }
+    }
+    let layouts = &app.engine.detector.layouts;
+    let target = match rule {
+        AppRule::English => layouts.all().find(|&l| layouts.is_latin(l)),
+        AppRule::Remember => exe.and_then(|n| app.remembered.get(n).copied()),
+        _ => None,
+    };
+    if let Some(l) = target {
+        unsafe { PostMessageW(app.hwnd, WM_SWITCH_LAYOUT, lang_to_wparam(l), 0) };
+    }
 }
 
 pub(super) fn is_modifier(vk: u8) -> bool {
@@ -146,7 +177,13 @@ pub(super) fn handle_key(vk: u8, down: bool) -> bool {
             app.engine.reset();
             app.fg_exe = None;
             app.fg_known = false;
+            app.fg_rule = AppRule::Normal;
             unsafe { PostMessageW(app.hwnd, WM_FOREGROUND, fg as usize, 0) };
+        }
+        if app.fg_rule == AppRule::Off {
+            // "Off" for this program: not even hotkeys.
+            app.engine.reset();
+            return None;
         }
         let hkl = sys::current_hkl(fg);
         let layout = lang_of(&app.hkl, hkl);
@@ -175,7 +212,7 @@ pub(super) fn handle_key(vk: u8, down: bool) -> bool {
             return Some((out, app.hwnd));
         }
         let checking = skip && matches!(app.password, Password::Checking(_, until) if now < until);
-        let auto_allowed = app.fg_known && !app.fg_excluded && !checking;
+        let auto_allowed = app.fg_known && app.fg_rule != AppRule::Manual && !checking;
         let out = app.engine.on_key(vk, down, now, layout, auto_allowed);
         if out.auto_fix && app.engine.settings.sound {
             unsafe { PostMessageW(app.hwnd, WM_SOUND, 0, 0) };

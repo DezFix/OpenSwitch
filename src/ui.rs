@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Align, Color32, RichText, Sense};
-use openswitch::config::{is_hotkey_key, Hotkey, Settings, SENSITIVITY_PRESETS, THEMES, VK_CANCEL, VK_PAUSE};
+use openswitch::config::{is_hotkey_key, AppRule, Hotkey, Settings, SENSITIVITY_PRESETS, THEMES, VK_CANCEL, VK_PAUSE};
 use openswitch::i18n::{self, t, Lang};
 
 use crate::admin::{self, Failure};
@@ -644,18 +644,21 @@ impl SettingsApp {
             setting_row(ui, label, Some(hint), |ui| toggle(ui, &mut self.s.skip_passwords));
             ui.add_space(6.0);
         }
-        let mut list: Vec<String> = self.s.exclude.iter().cloned().collect();
-        list.sort();
-        let label = t("Programs without auto switching");
-        let hint =
-            t("Words are not fixed automatically in these programs, but hotkeys work. Handy for terminals, code editors and games.");
+        let rules = self.s.app_rules();
+        let label = t("Program rules");
+        let hint = t("How OpenSwitch works in these programs. Everywhere else — as usual.");
         let mut texts: Vec<&str> = vec![label, hint];
-        texts.extend(list.iter().map(|s| s.as_str()));
+        texts.extend(AppRule::LISTED.iter().flat_map(|&r| [rule_label(r), rule_hint(r)]));
+        texts.extend(rules.iter().map(|(n, _)| n.as_str()));
         if !p.row(ui, &texts) {
             return;
         }
         ui.label(label);
         ui.label(RichText::new(hint).small().weak());
+        ui.add_space(2.0);
+        for r in AppRule::LISTED {
+            ui.label(RichText::new(format!("• {} — {}", rule_label(r), rule_hint(r))).small().weak());
+        }
         ui.add_space(4.0);
         ui.horizontal_wrapped(|ui| {
             let mut picked: Option<String> = None;
@@ -663,7 +666,7 @@ impl SettingsApp {
                 ui,
                 |ui| {
                     for e in &self.running {
-                        if !self.s.exclude.contains(e) && ui.selectable_label(false, e).clicked() {
+                        if self.s.app_rule(e) == AppRule::Normal && ui.selectable_label(false, e).clicked() {
                             picked = Some(e.clone());
                         }
                     }
@@ -685,10 +688,38 @@ impl SettingsApp {
             }
         });
         ui.add_space(4.0);
-        let shown: Vec<&String> =
-            list.iter().filter(|e| p.all || !p.filtering() || p.hit(e) || p.hit(label) || p.hit(hint)).collect();
-        if let Some(remove) = removable_list(ui, &shown, t("List is empty")) {
-            self.s.exclude.remove(&remove);
+        let shown: Vec<&(String, AppRule)> =
+            rules.iter().filter(|(n, _)| p.all || !p.filtering() || p.hit(n) || p.hit(label) || p.hit(hint)).collect();
+        let mut changes: Vec<(String, AppRule)> = Vec::new();
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            if shown.is_empty() {
+                ui.label(RichText::new(t("List is empty")).weak());
+            }
+            egui::Grid::new("app_rules").num_columns(3).spacing([12.0, 6.0]).show(ui, |ui| {
+                for (name, rule) in shown {
+                    ui.label(name);
+                    let mut r = *rule;
+                    egui::ComboBox::from_id_salt(name.as_str()).selected_text(rule_label(r)).width(200.0).show_ui(
+                        ui,
+                        |ui| {
+                            for x in AppRule::LISTED {
+                                ui.selectable_value(&mut r, x, rule_label(x)).on_hover_text(rule_hint(x));
+                            }
+                        },
+                    );
+                    if r != *rule {
+                        changes.push((name.clone(), r));
+                    }
+                    if ui.small_button("×").on_hover_text(t("Remove")).clicked() {
+                        changes.push((name.clone(), AppRule::Normal));
+                    }
+                    ui.end_row();
+                }
+            });
+        });
+        for (name, rule) in changes {
+            self.s.set_app_rule(&name, rule);
         }
     }
 
@@ -1164,7 +1195,29 @@ fn add_exe(s: &mut Settings, name: &str) {
     if !n.ends_with(".exe") {
         n.push_str(".exe");
     }
-    s.exclude.insert(n);
+    if s.app_rule(&n) == AppRule::Normal {
+        s.set_app_rule(&n, AppRule::Manual);
+    }
+}
+
+fn rule_label(r: AppRule) -> &'static str {
+    match r {
+        AppRule::Normal => t("As usual"),
+        AppRule::Manual => t("Only by hotkey"),
+        AppRule::English => t("Start with English"),
+        AppRule::Remember => t("Remember the layout"),
+        AppRule::Off => t("Off completely"),
+    }
+}
+
+fn rule_hint(r: AppRule) -> &'static str {
+    match r {
+        AppRule::Normal => "",
+        AppRule::Manual => t("no automatic fixes, hotkeys work (terminals, code editors)"),
+        AppRule::English => t("the English layout each time you switch to the program"),
+        AppRule::Remember => t("the layout you had when you left the program"),
+        AppRule::Off => t("OpenSwitch does nothing, hotkeys too (games)"),
+    }
 }
 
 /// Window icon: the application icon (assets/openswitch.svg) rendered at 64x64, raw RGBA.

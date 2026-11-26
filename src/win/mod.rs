@@ -8,7 +8,7 @@
 //! happens on the message loop after the hook returned, or on a worker thread.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr::{null, null_mut};
@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::time::Instant;
 
+use openswitch::config::AppRule;
 use openswitch::detect::Detector;
 use openswitch::engine::{Action, Engine};
 use openswitch::i18n::{self, t};
@@ -99,7 +100,13 @@ struct App {
     hwnd: HWND,
     last_fg: HWND,
     fg_exe: Option<String>,
-    fg_excluded: bool,
+    /// Rule of the foreground program (Normal while unknown).
+    fg_rule: AppRule,
+    /// The window and program the program rules were last applied to.
+    rules_fg: HWND,
+    rules_exe: Option<String>,
+    /// Layout each "remember the layout" program had when the user left it.
+    remembered: HashMap<String, Lang>,
     /// False between a foreground change seen by the hook and the program name lookup.
     fg_known: bool,
     /// What the tray icon shows: layout code (EN/RU/UA/...), its side, auto switching on/off.
@@ -370,7 +377,10 @@ pub fn run() {
                 hwnd,
                 last_fg: null_mut(),
                 fg_exe: None,
-                fg_excluded: false,
+                fg_rule: AppRule::Normal,
+                rules_fg: null_mut(),
+                rules_exe: None,
+                remembered: HashMap::new(),
                 fg_known: false,
                 icon_state: None,
                 hkl: Vec::new(),
