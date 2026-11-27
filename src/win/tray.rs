@@ -88,7 +88,7 @@ pub(super) fn copy_tip(dst: &mut [u16; 128], s: &str) {
 pub(super) unsafe fn update_tray(app: &mut App, force: bool, add: bool) {
     let fg = GetForegroundWindow();
     // When our own menu/window is active keep showing the previous layout.
-    let auto = app.engine.settings.auto_switch;
+    let auto = app.engine.settings.enabled;
     let (text, lang) = match app.icon_state {
         Some((code, lang, _)) if fg == app.hwnd => (code, lang),
         _ => {
@@ -117,7 +117,7 @@ pub(super) unsafe fn update_tray(app: &mut App, force: bool, add: bool) {
     nid.hIcon = icon;
     copy_tip(
         &mut nid.szTip,
-        if auto { t("OpenSwitch — auto switching is on") } else { t("OpenSwitch — auto switching is off") },
+        if auto { t("OpenSwitch — automatic fixes are on") } else { t("OpenSwitch — automatic fixes are off") },
     );
     Shell_NotifyIconW(if add { NIM_ADD } else { NIM_MODIFY }, &nid);
     if !app.icon.is_null() {
@@ -151,10 +151,10 @@ pub(super) unsafe fn remove_tray(hwnd: HWND) {
 
 pub(super) fn set_auto(on: bool) {
     with_app(|app| {
-        app.engine.settings.auto_switch = on;
+        app.engine.settings.enabled = on;
         unsafe { update_tray(app, true, false) };
     });
-    sys::save_setting("auto_switch", if on { "true" } else { "false" });
+    sys::save_setting("enabled", if on { "true" } else { "false" });
 }
 
 pub(super) fn reload() -> Vec<String> {
@@ -185,7 +185,7 @@ pub(super) fn message_box(hwnd: HWND, text: &str, flags: MESSAGEBOX_STYLE) {
 }
 
 pub(super) unsafe fn show_menu(hwnd: HWND) {
-    let auto = with_app(|a| a.engine.settings.auto_switch).unwrap_or(true);
+    let auto = with_app(|a| a.engine.settings.enabled).unwrap_or(true);
     let m = CreatePopupMenu();
     let item = |id: usize, text: &str, checked: bool| {
         AppendMenuW(m, MF_STRING | if checked { MF_CHECKED } else { MF_UNCHECKED }, id, w(text).as_ptr());
@@ -193,7 +193,7 @@ pub(super) unsafe fn show_menu(hwnd: HWND) {
     item(ID_SETTINGS, t("Settings…"), false);
     SetMenuDefaultItem(m, ID_SETTINGS as u32, 0);
     AppendMenuW(m, MF_SEPARATOR, 0, null());
-    item(ID_AUTO, t("Auto layout switching"), auto);
+    item(ID_AUTO, t("Automatic fixes"), auto);
     if with_app(|a| a.engine.settings.run_as_admin).unwrap_or(false) {
         // The administrator task starts it: a Run key would start a second copy at logon.
         AppendMenuW(m, MF_STRING | MF_CHECKED | MF_GRAYED, ID_STARTUP, w(t("Start with Windows")).as_ptr());
@@ -229,7 +229,7 @@ pub(super) unsafe fn show_menu(hwnd: HWND) {
             message_box(
                 hwnd,
                 &i18n::f(
-                    "OpenSwitch {} — free EN/RU/UA layout switcher.\nGNU GPL v3 license.\n\n{} — fix the last word (again — undo)\n{}\n{} — fix selected text\n{} — enable/disable auto switching\n\nClick the icon — enable/disable auto switching.",
+                    "OpenSwitch {} — free EN/RU/UA layout switcher.\nGNU GPL v3 license.\n\n{} — fix the last word (again — undo)\n{}\n{} — fix selected text\n{} — turn automatic fixes on/off\n\nClick the icon — turn automatic fixes on/off.",
                     &[&env!("CARGO_PKG_VERSION"), &s.hotkey_convert_word, &double_shift, &s.hotkey_convert_selection, &s.hotkey_toggle_auto],
                 ),
                 MB_ICONINFORMATION,

@@ -157,6 +157,9 @@ pub struct Settings {
     /// Start with administrator rights through the Task Scheduler task (set by the settings
     /// window together with the task itself).
     pub run_as_admin: bool,
+    /// Automatic fixes at all (the tray icon and the "toggle" hotkey switch it). Off: nothing
+    /// is fixed by itself; hotkeys still work.
+    pub enabled: bool,
     /// The first-run window was shown (or skipped).
     pub setup_done: bool,
     pub auto_switch: bool,
@@ -210,6 +213,7 @@ impl Default for Settings {
             module_text: true,
             module_spelling: false,
             setup_done: false,
+            enabled: true,
             run_as_admin: false,
             auto_switch: true,
             single_letters: true,
@@ -299,6 +303,10 @@ module_text = true
 # Орфография: исправление опечаток по встроенным словарям
 module_spelling = false
 
+# Автоисправления включены (переключаются щелчком по значку в трее и Alt+Pause).
+# Когда выключены, ничего не исправляется само; горячие клавиши работают всегда.
+enabled = true
+
 # Окно первого запуска уже показано
 setup_done = false
 
@@ -364,7 +372,7 @@ hotkey_convert_word = Pause
 # Исправить раскладку выделенного текста
 hotkey_convert_selection = Shift+Pause
 
-# Включить/выключить автопереключение
+# Включить/выключить автоисправления (горячие клавиши работают всегда)
 hotkey_toggle_auto = Alt+Pause
 
 # Раскладки, на которые не переключать автоматически (коды через запятую: EN, RU, UA, BY)
@@ -442,6 +450,7 @@ impl Settings {
                 "module_text" => parse_bool(v).map(|b| s.module_text = b).is_some(),
                 "module_spelling" => parse_bool(v).map(|b| s.module_spelling = b).is_some(),
                 "setup_done" => parse_bool(v).map(|b| s.setup_done = b).is_some(),
+                "enabled" => parse_bool(v).map(|b| s.enabled = b).is_some(),
                 "run_as_admin" => parse_bool(v).map(|b| s.run_as_admin = b).is_some(),
                 "auto_switch" => parse_bool(v).map(|b| s.auto_switch = b).is_some(),
                 "single_letters" => parse_bool(v).map(|b| s.single_letters = b).is_some(),
@@ -564,6 +573,7 @@ impl Settings {
             ("module_text", b(self.module_text).to_string()),
             ("module_spelling", b(self.module_spelling).to_string()),
             ("setup_done", b(self.setup_done).to_string()),
+            ("enabled", b(self.enabled).to_string()),
             ("run_as_admin", b(self.run_as_admin).to_string()),
             ("auto_switch", b(self.auto_switch).to_string()),
             ("single_letters", b(self.single_letters).to_string()),
@@ -758,6 +768,7 @@ mod tests {
             theme: "dark".into(),
             sound: true,
             check_updates: true,
+            enabled: false,
             sensitivity: 1.5,
             hotkey_convert_word: Hotkey::parse("Ctrl+Shift+F12").unwrap(),
             hotkey_toggle_auto: Hotkey::NONE,
@@ -772,6 +783,7 @@ mod tests {
         assert_eq!((p.theme.as_str(), s.theme.as_str()), ("dark", "system"));
         assert!(p.sound && !s.sound);
         assert!(p.check_updates && !s.check_updates && !d.check_updates);
+        assert!(!p.enabled && s.enabled && d.enabled);
         assert_eq!(Settings::parse("theme = blue").1.len(), 1);
         assert!(d.skip_passwords && s.skip_passwords);
         assert_eq!(p.sensitivity, 1.5);

@@ -277,6 +277,8 @@ impl Engine {
     /// `layout` is the active layout of the focused window (None if it is neither EN nor RU),
     /// `auto_allowed` is false for excluded applications.
     pub fn on_key(&mut self, vk: u8, down: bool, now: u64, layout: Option<Lang>, auto_allowed: bool) -> Output {
+        // Automatic fixes turned off (tray icon, hotkey): only the hotkeys work.
+        let auto_allowed = auto_allowed && self.settings.enabled;
         let is_shift = matches!(vk, VK_SHIFT | VK_LSHIFT | VK_RSHIFT);
 
         if !down {
@@ -700,6 +702,7 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::VK_PAUSE;
     use crate::layout::keys_for_text;
 
     fn typ(e: &mut Engine, text: &str, lang: Lang, t: &mut u64) -> Vec<Action> {
@@ -1082,6 +1085,29 @@ mod tests {
         e.reset();
         typ(&mut e, "првиет", Lang::Ru, &mut t);
         assert!(!space(&mut e, Lang::Ru, &mut t).swallow);
+    }
+
+    /// The tray switch turns off every automatic fix (layout, text, spelling), not only the
+    /// layout; the hotkeys keep working.
+    #[test]
+    fn master_switch() {
+        let mut t = 0;
+        let s = Settings { module_spelling: true, enabled: false, ..Settings::default() };
+        let mut e = Engine::new(Detector::new(), s);
+        for (w, lang) in [("ghbdtn", Lang::En), ("првиет", Lang::Ru), ("пРИВЕТ", Lang::Ru)] {
+            e.reset();
+            typ(&mut e, w, lang, &mut t);
+            assert!(!space(&mut e, lang, &mut t).swallow, "{w}");
+        }
+        e.reset();
+        e.sentence_start = true;
+        typ(&mut e, "привет", Lang::Ru, &mut t);
+        assert!(!space(&mut e, Lang::Ru, &mut t).swallow); // no capital letter either
+                                                           // Pause still fixes the last word
+        e.reset();
+        typ(&mut e, "ghbdtn", Lang::En, &mut t);
+        let o = e.on_key(VK_PAUSE, true, t, Some(Lang::En), true);
+        assert!(o.swallow && o.actions.contains(&Action::Type("привет".into())));
     }
 
     #[test]

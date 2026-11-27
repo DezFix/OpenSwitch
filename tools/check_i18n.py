@@ -14,7 +14,7 @@ import sys
 
 STR = r'"((?:[^"\\]|\\.)*)"'
 # Keys passed to t() through constants (HOTKEYS, SENSITIVITY_PRESETS).
-INDIRECT = {"Fix the last word", "Fix selected text", "Enable/disable auto switching", "Cautious", "Normal", "Bold"}
+INDIRECT = {"Fix the last word", "Fix selected text", "Turn automatic fixes on/off", "Cautious", "Normal", "Bold"}
 
 src = open('src/i18n.rs', encoding='utf-8').read()
 ru = src[src.index('const RU'):src.index('const UK')]
