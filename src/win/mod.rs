@@ -172,7 +172,7 @@ unsafe fn wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
         WM_TRAY => {
             match lparam as u32 {
                 WM_LBUTTONUP => {
-                    let auto = with_app(|a| a.engine.settings.auto_switch).unwrap_or(true);
+                    let auto = with_app(|a| a.engine.settings.enabled).unwrap_or(true);
                     set_auto(!auto);
                 }
                 WM_RBUTTONUP | WM_CONTEXTMENU => show_menu(hwnd),
@@ -182,7 +182,7 @@ unsafe fn wnd_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -
             0
         }
         WM_TOGGLE_AUTO => {
-            let auto = with_app(|a| a.engine.settings.auto_switch).unwrap_or(true);
+            let auto = with_app(|a| a.engine.settings.enabled).unwrap_or(true);
             set_auto(!auto);
             0
         }

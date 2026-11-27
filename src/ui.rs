@@ -61,7 +61,7 @@ impl Section {
 }
 
 /// The hotkeys edited in the window, in display order.
-const HOTKEYS: [&str; 3] = ["Fix the last word", "Fix selected text", "Enable/disable auto switching"];
+const HOTKEYS: [&str; 3] = ["Fix the last word", "Fix selected text", "Turn automatic fixes on/off"];
 
 fn hotkey_mut(s: &mut Settings, i: usize) -> &mut Hotkey {
     match i {
@@ -351,6 +351,13 @@ impl SettingsApp {
 
     fn general(&mut self, ui: &mut egui::Ui, p: &mut Page) {
         p.begin(Section::General);
+        let (label, hint) = (
+            t("Automatic fixes"),
+            t("Off: nothing is fixed by itself, hotkeys still work. Also: click the tray icon or press the hotkey."),
+        );
+        if p.row(ui, &[label, hint, "pause", "off"]) {
+            module_row(ui, label, hint, &mut self.s.enabled);
+        }
         let label = t("Window theme");
         if p.row(ui, &[label, t("Light"), t("Dark"), "theme"]) {
             setting_row(ui, label, None, |ui| {
